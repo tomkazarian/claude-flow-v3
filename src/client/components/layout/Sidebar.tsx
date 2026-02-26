@@ -7,6 +7,7 @@ import {
   Users,
   ListOrdered,
   BarChart3,
+  Activity,
   Settings,
   PanelLeftClose,
   PanelLeftOpen,
@@ -21,6 +22,7 @@ const navItems = [
   { to: '/profiles', label: 'Profiles', icon: Users },
   { to: '/queue', label: 'Queue', icon: ListOrdered },
   { to: '/analytics', label: 'Analytics', icon: BarChart3 },
+  { to: '/status', label: 'Status', icon: Activity },
   { to: '/settings', label: 'Settings', icon: Settings },
 ] as const;
 

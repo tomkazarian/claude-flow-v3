@@ -9,6 +9,7 @@ import { analyticsRoutes } from './routes/analytics.routes.js';
 import { discoveryRoutes } from './routes/discovery.routes.js';
 import { proxyRoutes } from './routes/proxy.routes.js';
 import { emailRoutes } from './routes/email.routes.js';
+import { statusRoutes } from './routes/status.routes.js';
 
 /**
  * Registers all API route modules under the /api/v1 prefix.
@@ -24,4 +25,5 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   await app.register(discoveryRoutes, { prefix: '/api/v1/discovery' });
   await app.register(proxyRoutes, { prefix: '/api/v1/proxy' });
   await app.register(emailRoutes, { prefix: '/api/v1/email' });
+  await app.register(statusRoutes, { prefix: '/api/v1/status' });
 }

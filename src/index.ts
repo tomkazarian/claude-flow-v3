@@ -68,6 +68,10 @@ async function main(): Promise<void> {
     const { createServer } = await import('./server.js');
     const app = await createServer();
 
+    // Initialize the status bridge to forward eventBus events to the status monitor
+    const { initStatusBridge } = await import('./analytics/status-bridge.js');
+    initStatusBridge();
+
     // Capture the graceful shutdown function for global error handlers
     const shutdownFn = (app as unknown as Record<string, unknown>)['gracefulShutdown'];
     if (typeof shutdownFn === 'function') {
