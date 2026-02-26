@@ -62,11 +62,31 @@ async function main(): Promise<void> {
   }
 
   // ---------------------------------------------------------------------------
-  // 4. Create and start the Fastify server
+  // 4. Initialize QueueManager (creates workers that process jobs)
+  // ---------------------------------------------------------------------------
+  try {
+    const { QueueManager } = await import('./queue/queue-manager.js');
+    const qm = new QueueManager();
+    await qm.initialize(env.REDIS_URL);
+    // Store globally so the server shutdown handler can access it
+    (globalThis as Record<string, unknown>)['__queueManager'] = qm;
+    logger.info('QueueManager initialized with workers');
+  } catch (error) {
+    logger.warn({ err: error }, 'QueueManager initialization failed; jobs will not be processed');
+  }
+
+  // ---------------------------------------------------------------------------
+  // 5. Create and start the Fastify server
   // ---------------------------------------------------------------------------
   try {
     const { createServer } = await import('./server.js');
     const app = await createServer();
+
+    // Attach the QueueManager to the app for graceful shutdown
+    const qm = (globalThis as Record<string, unknown>)['__queueManager'];
+    if (qm) {
+      (app as unknown as Record<string, unknown>)['queueManager'] = qm;
+    }
 
     // Initialize the status bridge to forward eventBus events to the status monitor
     const { initStatusBridge } = await import('./analytics/status-bridge.js');

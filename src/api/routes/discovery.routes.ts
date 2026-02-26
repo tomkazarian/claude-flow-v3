@@ -1,11 +1,14 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { eq, desc, count as countFn } from 'drizzle-orm';
+import { Queue } from 'bullmq';
 import { z } from 'zod';
 import { getDb } from '../../db/index.js';
 import { schema } from '../../db/index.js';
 import { generateId } from '../../shared/crypto.js';
 import { AppError } from '../../shared/errors.js';
 import { getLogger } from '../../shared/logger.js';
+import { QUEUE_NAMES } from '../../shared/constants.js';
+import { getRedis } from '../../queue/redis.js';
 import { validateBody, validateParams } from '../middleware/validator.js';
 import { idParamSchema } from '../schemas/common.schema.js';
 
@@ -38,47 +41,93 @@ export async function discoveryRoutes(app: FastifyInstance): Promise<void> {
       const parsed = runDiscoverySchema.safeParse(request.body ?? {});
       const { sourceId } = parsed.success ? parsed.data : {} as { sourceId?: string };
       const db = getDb();
+      const redis = getRedis();
 
-      if (sourceId) {
-        // Validate the source exists
-        const source = await db
-          .select()
-          .from(schema.discoverySources)
-          .where(eq(schema.discoverySources.id, sourceId))
-          .limit(1);
+      if (!redis) {
+        throw new AppError('Redis not available — cannot queue discovery jobs', 'REDIS_UNAVAILABLE', 503);
+      }
 
-        if (source.length === 0) {
-          throw new AppError('Discovery source not found', 'SOURCE_NOT_FOUND', 404);
+      const discoveryQueue = new Queue(QUEUE_NAMES.DISCOVERY, {
+        connection: redis,
+      });
+
+      try {
+        if (sourceId) {
+          // Validate the source exists and queue a single job
+          const sources = await db
+            .select()
+            .from(schema.discoverySources)
+            .where(eq(schema.discoverySources.id, sourceId))
+            .limit(1);
+
+          if (sources.length === 0) {
+            throw new AppError('Discovery source not found', 'SOURCE_NOT_FOUND', 404);
+          }
+
+          const source = sources[0]!;
+          let sourceConfig: Record<string, unknown> = {};
+          try {
+            sourceConfig = source.config ? (JSON.parse(source.config) as Record<string, unknown>) : {};
+          } catch { /* use empty config */ }
+
+          const job = await discoveryQueue.add('discovery-job', {
+            sourceId: source.id,
+            sourceName: source.name,
+            sourceUrl: source.url ?? '',
+            sourceType: source.type,
+            sourceConfig,
+          });
+
+          logger.info({ sourceId, jobId: job.id }, 'Manual discovery job queued for specific source');
+
+          return reply.status(202).send({
+            data: {
+              status: 'queued',
+              jobId: job.id,
+              sourceId,
+              sourceName: source.name,
+              message: `Discovery job queued for source "${source.name}"`,
+            },
+          });
         }
 
-        logger.info({ sourceId }, 'Manual discovery triggered for specific source');
+        // Trigger discovery for all active sources
+        const activeSources = await db
+          .select()
+          .from(schema.discoverySources)
+          .where(eq(schema.discoverySources.isActive, 1));
+
+        const jobIds: string[] = [];
+        for (const source of activeSources) {
+          let sourceConfig: Record<string, unknown> = {};
+          try {
+            sourceConfig = source.config ? (JSON.parse(source.config) as Record<string, unknown>) : {};
+          } catch { /* use empty config */ }
+
+          const job = await discoveryQueue.add('discovery-job', {
+            sourceId: source.id,
+            sourceName: source.name,
+            sourceUrl: source.url ?? '',
+            sourceType: source.type,
+            sourceConfig,
+          });
+          if (job.id) jobIds.push(job.id);
+        }
+
+        logger.info({ sourceCount: activeSources.length, jobIds }, 'Manual discovery jobs queued for all active sources');
 
         return reply.status(202).send({
           data: {
-            status: 'started',
-            sourceId,
-            sourceName: source[0]!.name,
-            message: `Discovery run started for source "${source[0]!.name}"`,
+            status: 'queued',
+            jobsQueued: jobIds.length,
+            jobIds,
+            sources: activeSources.map((s) => ({ id: s.id, name: s.name })),
+            message: `${jobIds.length} discovery job(s) queued for active sources`,
           },
         });
+      } finally {
+        await discoveryQueue.close();
       }
-
-      // Trigger discovery for all active sources
-      const activeSources = await db
-        .select({ id: schema.discoverySources.id, name: schema.discoverySources.name })
-        .from(schema.discoverySources)
-        .where(eq(schema.discoverySources.isActive, 1));
-
-      logger.info({ sourceCount: activeSources.length }, 'Manual discovery triggered for all sources');
-
-      return reply.status(202).send({
-        data: {
-          status: 'started',
-          sourcesTriggered: activeSources.length,
-          sources: activeSources.map((s) => ({ id: s.id, name: s.name })),
-          message: `Discovery run started for ${activeSources.length} active sources`,
-        },
-      });
     },
   );
 
