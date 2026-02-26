@@ -29,7 +29,7 @@ export function QueuePage() {
         <div>
           <h2 className="text-lg font-semibold text-zinc-100">Queue Management</h2>
           <p className="text-sm text-zinc-500">
-            {data?.totalJobs ?? 0} total jobs | {data?.jobsPerMinute.toFixed(1) ?? 0} jobs/min
+            {data?.totalJobs ?? 0} total jobs | {data?.jobsPerMinute?.toFixed(1) ?? '0.0'} jobs/min
           </p>
         </div>
         <button

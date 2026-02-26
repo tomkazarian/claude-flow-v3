@@ -119,7 +119,7 @@ export interface EntryWithContest extends Entry {
     | "prizeValue"
     | "endDate"
     | "status"
-  >;
+  > | null;
 }
 
 // ---------------------------------------------------------------------------

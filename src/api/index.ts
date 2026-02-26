@@ -9,6 +9,7 @@ import { analyticsRoutes } from './routes/analytics.routes.js';
 import { discoveryRoutes } from './routes/discovery.routes.js';
 import { proxyRoutes } from './routes/proxy.routes.js';
 import { emailRoutes } from './routes/email.routes.js';
+import { dashboardRoutes } from './routes/dashboard.routes.js';
 import { statusRoutes } from './routes/status.routes.js';
 
 /**
@@ -16,6 +17,7 @@ import { statusRoutes } from './routes/status.routes.js';
  */
 export async function registerRoutes(app: FastifyInstance): Promise<void> {
   await app.register(healthRoutes, { prefix: '/api/v1/health' });
+  await app.register(dashboardRoutes, { prefix: '/api/v1/dashboard' });
   await app.register(contestRoutes, { prefix: '/api/v1/contests' });
   await app.register(entryRoutes, { prefix: '/api/v1/entries' });
   await app.register(profileRoutes, { prefix: '/api/v1/profiles' });

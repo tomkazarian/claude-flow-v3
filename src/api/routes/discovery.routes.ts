@@ -33,9 +33,10 @@ export async function discoveryRoutes(app: FastifyInstance): Promise<void> {
   // POST /run - Trigger a discovery run
   app.post(
     '/run',
-    { preHandler: [validateBody(runDiscoverySchema)] },
     async (request, reply: FastifyReply) => {
-      const { sourceId } = request.body as { sourceId?: string };
+      // Body is optional for this endpoint - parse it if present
+      const parsed = runDiscoverySchema.safeParse(request.body ?? {});
+      const { sourceId } = parsed.success ? parsed.data : {} as { sourceId?: string };
       const db = getDb();
 
       if (sourceId) {

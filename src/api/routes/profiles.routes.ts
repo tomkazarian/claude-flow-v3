@@ -111,13 +111,13 @@ export async function profileRoutes(app: FastifyInstance): Promise<void> {
     },
   );
 
-  // PUT /:id - Full update
+  // PUT /:id - Full update (accepts partial body for convenience)
   app.put(
     '/:id',
-    { preHandler: [validateParams(idParamSchema), validateBody(createProfileSchema)] },
+    { preHandler: [validateParams(idParamSchema), validateBody(updateProfileSchema)] },
     async (request, reply: FastifyReply) => {
       const { id } = request.params as { id: string };
-      const body = request.body as CreateProfileInput;
+      const body = request.body as UpdateProfileInput;
       const db = getDb();
 
       const existing = await db
@@ -132,26 +132,28 @@ export async function profileRoutes(app: FastifyInstance): Promise<void> {
 
       const now = new Date().toISOString();
 
+      // Only update fields that were explicitly provided
+      const updateValues: Record<string, unknown> = { updatedAt: now };
+      if (body.firstName !== undefined) updateValues['firstName'] = body.firstName;
+      if (body.lastName !== undefined) updateValues['lastName'] = body.lastName;
+      if (body.email !== undefined) updateValues['email'] = body.email;
+      if (body.emailAliases !== undefined) updateValues['emailAliases'] = JSON.stringify(body.emailAliases);
+      if (body.phone !== undefined) updateValues['phone'] = body.phone;
+      if (body.phoneProvider !== undefined) updateValues['phoneProvider'] = body.phoneProvider;
+      if (body.addressLine1 !== undefined) updateValues['addressLine1'] = body.addressLine1;
+      if (body.addressLine2 !== undefined) updateValues['addressLine2'] = body.addressLine2;
+      if (body.city !== undefined) updateValues['city'] = body.city;
+      if (body.state !== undefined) updateValues['state'] = body.state;
+      if (body.zip !== undefined) updateValues['zip'] = body.zip;
+      if (body.country !== undefined) updateValues['country'] = body.country;
+      if (body.dateOfBirth !== undefined) updateValues['dateOfBirth'] = body.dateOfBirth;
+      if (body.gender !== undefined) updateValues['gender'] = body.gender;
+      if (body.socialAccounts !== undefined) updateValues['socialAccounts'] = JSON.stringify(body.socialAccounts);
+      if (body.isActive !== undefined) updateValues['isActive'] = body.isActive ? 1 : 0;
+
       await db
         .update(schema.profiles)
-        .set({
-          firstName: body.firstName,
-          lastName: body.lastName,
-          email: body.email,
-          emailAliases: JSON.stringify(body.emailAliases ?? []),
-          phone: body.phone ?? null,
-          phoneProvider: body.phoneProvider ?? null,
-          addressLine1: body.addressLine1 ?? null,
-          addressLine2: body.addressLine2 ?? null,
-          city: body.city ?? null,
-          state: body.state ?? null,
-          zip: body.zip ?? null,
-          country: body.country ?? 'US',
-          dateOfBirth: body.dateOfBirth ?? null,
-          gender: body.gender ?? null,
-          socialAccounts: JSON.stringify(body.socialAccounts ?? {}),
-          updatedAt: now,
-        })
+        .set(updateValues)
         .where(eq(schema.profiles.id, id));
 
       const updated = await db
@@ -160,7 +162,7 @@ export async function profileRoutes(app: FastifyInstance): Promise<void> {
         .where(eq(schema.profiles.id, id))
         .limit(1);
 
-      logger.info({ profileId: id }, 'Profile fully updated');
+      logger.info({ profileId: id }, 'Profile updated');
 
       return reply.send({ data: updated[0] });
     },

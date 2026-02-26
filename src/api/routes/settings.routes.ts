@@ -104,12 +104,30 @@ const captchaSettingsSchema = z.object({
   maxRetries: z.number().int().positive().optional(),
 }).passthrough();
 
+const dayNameToNumber: Record<string, number> = {
+  sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6,
+};
+
+const dayOfWeekItem = z.union([
+  z.number().int().min(0).max(6),
+  z.string().transform((val) => {
+    const lower = val.toLowerCase();
+    const num = dayNameToNumber[lower];
+    if (num === undefined) {
+      throw new Error(`Invalid day name: ${val}`);
+    }
+    return num;
+  }),
+]);
+
 const scheduleSettingsSchema = z.object({
   enabled: z.boolean().optional(),
   startHour: z.number().int().min(0).max(23).optional(),
   endHour: z.number().int().min(0).max(23).optional(),
   maxEntriesPerDay: z.number().int().positive().optional(),
-  daysOfWeek: z.array(z.number().int().min(0).max(6)).optional(),
+  daysOfWeek: z.array(dayOfWeekItem).optional(),
+  entryTime: z.string().optional(),
+  timezone: z.string().optional(),
 }).passthrough();
 
 const proxySettingsSchema = z.object({

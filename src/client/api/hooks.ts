@@ -6,19 +6,35 @@ import {
 } from '@tanstack/react-query';
 import { apiClient } from './client';
 import type { Contest, ContestFilter, ContestCreateInput, ContestUpdateInput, ContestWithStats } from '@/types/contest.types';
-import type { Entry, EntryFilter, EntryStats, EntryWithContest } from '@/types/entry.types';
+import type { Entry, EntryFilter, EntryWithContest } from '@/types/entry.types';
 import type { Profile, ProfileCreateInput, ProfileUpdateInput } from '@/types/profile.types';
-import type { QueueMetrics } from '@/types/queue.types';
+import type { QueueStatus } from '@/types/queue.types';
 
 // ---------------------------------------------------------------------------
-// Response wrappers
+// Response wrappers - these match what the backend actually sends
 // ---------------------------------------------------------------------------
+
+/** Backend wraps most responses in { data: ... } */
+interface DataEnvelope<T> {
+  data: T;
+}
 
 interface PaginatedResponse<T> {
   data: T[];
   total: number;
   limit: number;
   offset: number;
+}
+
+/** Backend paginated response uses page-based pagination */
+interface ServerPaginatedResponse<T> {
+  data: T[];
+  pagination: {
+    page: number;
+    limit: number;
+    total: number;
+    totalPages: number;
+  };
 }
 
 interface DashboardStats {
@@ -77,6 +93,21 @@ interface SuccessRatePoint {
   rate: number;
 }
 
+interface EntryStats {
+  total: number;
+  pending: number;
+  submitted: number;
+  confirmed: number;
+  failed: number;
+  won: number;
+  lost: number;
+  expired: number;
+  duplicate: number;
+  avgDurationMs: number | null;
+  totalCaptchaCost: number;
+  successRate: number;
+}
+
 interface SettingsData {
   general: {
     maxEntriesPerHour: number;
@@ -121,6 +152,17 @@ interface DiscoverySource {
   enabled: boolean;
   lastRun: string | null;
   contestsFound: number;
+}
+
+interface QueueMetrics {
+  queues: QueueStatus[];
+  totalJobs: number;
+  totalCompleted: number;
+  totalFailed: number;
+  avgProcessingTimeMs: number;
+  jobsPerMinute: number;
+  oldestWaitingJob: string | null;
+  uptimeMs: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -173,8 +215,29 @@ export const queryKeys = {
 export function useContests(filters?: ContestFilter) {
   return useQuery({
     queryKey: queryKeys.contests.list(filters),
-    queryFn: ({ signal }) =>
-      apiClient.get<PaginatedResponse<ContestWithStats>>('/contests', filters as Record<string, string | number | boolean | undefined>, signal),
+    queryFn: async ({ signal }) => {
+      // Backend uses page-based pagination; convert offset to page
+      const page = filters?.offset != null && filters?.limit
+        ? Math.floor(filters.offset / filters.limit) + 1
+        : 1;
+      const params: Record<string, string | number | boolean | undefined> = {
+        page,
+        limit: filters?.limit ?? 20,
+        status: filters?.status as string | undefined,
+        type: filters?.type as string | undefined,
+        search: filters?.search,
+        sortBy: filters?.orderBy,
+        sortOrder: filters?.orderDirection,
+      };
+      const resp = await apiClient.get<ServerPaginatedResponse<ContestWithStats>>('/contests', params, signal);
+      // Normalize to client PaginatedResponse shape
+      return {
+        data: resp.data ?? [],
+        total: resp.pagination?.total ?? 0,
+        limit: resp.pagination?.limit ?? (filters?.limit ?? 20),
+        offset: filters?.offset ?? 0,
+      } as PaginatedResponse<ContestWithStats>;
+    },
     staleTime: 60_000,
   });
 }
@@ -182,7 +245,10 @@ export function useContests(filters?: ContestFilter) {
 export function useContest(id: string, options?: Partial<UseQueryOptions<Contest>>) {
   return useQuery({
     queryKey: queryKeys.contests.detail(id),
-    queryFn: ({ signal }) => apiClient.get<Contest>(`/contests/${id}`, undefined, signal),
+    queryFn: async ({ signal }) => {
+      const resp = await apiClient.get<DataEnvelope<Contest>>(`/contests/${id}`, undefined, signal);
+      return resp.data;
+    },
     enabled: !!id,
     ...options,
   });
@@ -192,7 +258,7 @@ export function useCreateContest() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (input: ContestCreateInput) =>
-      apiClient.post<Contest>('/contests', input),
+      apiClient.post<DataEnvelope<Contest>>('/contests', input),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.contests.all });
     },
@@ -203,7 +269,7 @@ export function useUpdateContest() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: ({ id, ...input }: ContestUpdateInput & { id: string }) =>
-      apiClient.patch<Contest>(`/contests/${id}`, input),
+      apiClient.patch<DataEnvelope<Contest>>(`/contests/${id}`, input),
     onSuccess: (_data, variables) => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.contests.all });
       void queryClient.invalidateQueries({ queryKey: queryKeys.contests.detail(variables.id) });
@@ -215,7 +281,7 @@ export function useEnterContest() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: ({ contestId, profileId }: { contestId: string; profileId: string }) =>
-      apiClient.post<Entry>(`/contests/${contestId}/enter`, { profileId }),
+      apiClient.post<DataEnvelope<Entry>>(`/contests/${contestId}/enter`, { profileId }),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.entries.all });
       void queryClient.invalidateQueries({ queryKey: queryKeys.dashboard.stats() });
@@ -230,8 +296,26 @@ export function useEnterContest() {
 export function useEntries(filters?: EntryFilter) {
   return useQuery({
     queryKey: queryKeys.entries.list(filters),
-    queryFn: ({ signal }) =>
-      apiClient.get<PaginatedResponse<EntryWithContest>>('/entries', filters as Record<string, string | number | boolean | undefined>, signal),
+    queryFn: async ({ signal }) => {
+      // Backend uses page-based pagination; convert offset to page
+      const page = filters?.offset != null && filters?.limit
+        ? Math.floor(filters.offset / filters.limit) + 1
+        : 1;
+      const params: Record<string, string | number | boolean | undefined> = {
+        page,
+        limit: filters?.limit ?? 25,
+        status: filters?.status as string | undefined,
+        contestId: filters?.contestId,
+        profileId: filters?.profileId,
+      };
+      const resp = await apiClient.get<ServerPaginatedResponse<EntryWithContest>>('/entries', params, signal);
+      return {
+        data: resp.data ?? [],
+        total: resp.pagination?.total ?? 0,
+        limit: resp.pagination?.limit ?? (filters?.limit ?? 25),
+        offset: filters?.offset ?? 0,
+      } as PaginatedResponse<EntryWithContest>;
+    },
     staleTime: 30_000,
   });
 }
@@ -239,7 +323,10 @@ export function useEntries(filters?: EntryFilter) {
 export function useEntry(id: string) {
   return useQuery({
     queryKey: queryKeys.entries.detail(id),
-    queryFn: ({ signal }) => apiClient.get<EntryWithContest>(`/entries/${id}`, undefined, signal),
+    queryFn: async ({ signal }) => {
+      const resp = await apiClient.get<DataEnvelope<EntryWithContest>>(`/entries/${id}`, undefined, signal);
+      return resp.data;
+    },
     enabled: !!id,
   });
 }
@@ -248,7 +335,7 @@ export function useRetryEntry() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (entryId: string) =>
-      apiClient.post<Entry>(`/entries/${entryId}/retry`),
+      apiClient.post<unknown>(`/entries/${entryId}/retry`),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.entries.all });
     },
@@ -258,8 +345,33 @@ export function useRetryEntry() {
 export function useEntryStats(filters?: Partial<EntryFilter>) {
   return useQuery({
     queryKey: queryKeys.entries.stats(filters),
-    queryFn: ({ signal }) =>
-      apiClient.get<EntryStats>('/entries/stats', filters as Record<string, string | number | boolean | undefined>, signal),
+    queryFn: async ({ signal }) => {
+      // Backend returns { data: { total, byStatus: {...}, successRate, avgDurationMs, totalCaptchaCost } }
+      const resp = await apiClient.get<DataEnvelope<{
+        total: number;
+        byStatus: Record<string, number>;
+        successRate: number;
+        avgDurationMs: number | null;
+        totalCaptchaCost: number;
+      }>>('/entries/stats', filters as Record<string, string | number | boolean | undefined>, signal);
+      const raw = resp.data;
+      // Normalize successRate: backend sends as percentage (e.g., 85.2), convert to fraction
+      const successRate = (raw?.successRate ?? 0) / 100;
+      return {
+        total: raw?.total ?? 0,
+        pending: raw?.byStatus?.pending ?? 0,
+        submitted: raw?.byStatus?.submitted ?? 0,
+        confirmed: raw?.byStatus?.confirmed ?? 0,
+        failed: raw?.byStatus?.failed ?? 0,
+        won: raw?.byStatus?.won ?? 0,
+        lost: raw?.byStatus?.lost ?? 0,
+        expired: raw?.byStatus?.expired ?? 0,
+        duplicate: raw?.byStatus?.duplicate ?? 0,
+        avgDurationMs: raw?.avgDurationMs ?? null,
+        totalCaptchaCost: raw?.totalCaptchaCost ?? 0,
+        successRate,
+      } as EntryStats;
+    },
     staleTime: 60_000,
   });
 }
@@ -271,7 +383,11 @@ export function useEntryStats(filters?: Partial<EntryFilter>) {
 export function useProfiles() {
   return useQuery({
     queryKey: queryKeys.profiles.list(),
-    queryFn: ({ signal }) => apiClient.get<Profile[]>('/profiles', undefined, signal),
+    queryFn: async ({ signal }) => {
+      // Backend returns { data: profileRows[] }
+      const resp = await apiClient.get<DataEnvelope<Profile[]>>('/profiles', undefined, signal);
+      return resp.data ?? [];
+    },
     staleTime: 120_000,
   });
 }
@@ -279,7 +395,10 @@ export function useProfiles() {
 export function useProfile(id: string) {
   return useQuery({
     queryKey: queryKeys.profiles.detail(id),
-    queryFn: ({ signal }) => apiClient.get<Profile>(`/profiles/${id}`, undefined, signal),
+    queryFn: async ({ signal }) => {
+      const resp = await apiClient.get<DataEnvelope<Profile>>(`/profiles/${id}`, undefined, signal);
+      return resp.data;
+    },
     enabled: !!id,
   });
 }
@@ -288,7 +407,7 @@ export function useCreateProfile() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (input: ProfileCreateInput) =>
-      apiClient.post<Profile>('/profiles', input),
+      apiClient.post<DataEnvelope<Profile>>('/profiles', input),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.profiles.all });
     },
@@ -299,7 +418,7 @@ export function useUpdateProfile() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: ({ id, ...input }: ProfileUpdateInput & { id: string }) =>
-      apiClient.patch<Profile>(`/profiles/${id}`, input),
+      apiClient.patch<DataEnvelope<Profile>>(`/profiles/${id}`, input),
     onSuccess: (_data, variables) => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.profiles.all });
       void queryClient.invalidateQueries({ queryKey: queryKeys.profiles.detail(variables.id) });
@@ -314,7 +433,41 @@ export function useUpdateProfile() {
 export function useQueueStatus() {
   return useQuery({
     queryKey: queryKeys.queue.status(),
-    queryFn: ({ signal }) => apiClient.get<QueueMetrics>('/queue/status', undefined, signal),
+    queryFn: async ({ signal }) => {
+      // Backend returns { data: { [queueName]: { status, waiting, active, completed, failed, delayed } } }
+      const resp = await apiClient.get<DataEnvelope<Record<string, {
+        status: string;
+        waiting?: number;
+        active?: number;
+        completed?: number;
+        failed?: number;
+        delayed?: number;
+      }>>>('/queue/status', undefined, signal);
+      const raw = resp.data ?? {};
+      // Transform the dict into an array matching QueueMetrics shape
+      const queues: QueueStatus[] = Object.entries(raw).map(([name, q]) => ({
+        name: name as QueueStatus['name'],
+        waiting: q?.waiting ?? 0,
+        active: q?.active ?? 0,
+        completed: q?.completed ?? 0,
+        failed: q?.failed ?? 0,
+        delayed: q?.delayed ?? 0,
+        paused: q?.status === 'paused',
+      }));
+      const totalJobs = queues.reduce((sum, q) => sum + q.waiting + q.active, 0);
+      const totalCompleted = queues.reduce((sum, q) => sum + q.completed, 0);
+      const totalFailed = queues.reduce((sum, q) => sum + q.failed, 0);
+      return {
+        queues,
+        totalJobs,
+        totalCompleted,
+        totalFailed,
+        avgProcessingTimeMs: 0,
+        jobsPerMinute: 0,
+        oldestWaitingJob: null,
+        uptimeMs: 0,
+      } as QueueMetrics;
+    },
     refetchInterval: 10_000,
     staleTime: 5_000,
   });
@@ -323,8 +476,8 @@ export function useQueueStatus() {
 export function usePauseQueue() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (queueName: string) =>
-      apiClient.post(`/queue/${queueName}/pause`),
+    mutationFn: (_queueName: string) =>
+      apiClient.post('/queue/pause'),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.queue.all });
     },
@@ -334,8 +487,8 @@ export function usePauseQueue() {
 export function useResumeQueue() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (queueName: string) =>
-      apiClient.post(`/queue/${queueName}/resume`),
+    mutationFn: (_queueName: string) =>
+      apiClient.post('/queue/resume'),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.queue.all });
     },
@@ -349,7 +502,15 @@ export function useResumeQueue() {
 export function useDashboardStats() {
   return useQuery({
     queryKey: queryKeys.dashboard.stats(),
-    queryFn: ({ signal }) => apiClient.get<DashboardStats>('/dashboard/stats', undefined, signal),
+    queryFn: async ({ signal }) => {
+      // Dashboard endpoint returns flat object (no { data: ... } wrapper)
+      const raw = await apiClient.get<DashboardStats>('/dashboard/stats', undefined, signal);
+      // successRate from backend is a percentage (e.g., 85.2), convert to fraction for UI
+      return {
+        ...raw,
+        successRate: (raw.successRate ?? 0) / 100,
+      };
+    },
     refetchInterval: 30_000,
     staleTime: 15_000,
   });
@@ -362,8 +523,28 @@ export function useDashboardStats() {
 export function useAnalyticsOverview(dateRange?: { from: string; to: string }) {
   return useQuery({
     queryKey: queryKeys.analytics.overview(dateRange),
-    queryFn: ({ signal }) =>
-      apiClient.get<AnalyticsOverview>('/analytics/overview', dateRange as Record<string, string>, signal),
+    queryFn: async ({ signal }) => {
+      // Backend returns { data: { entriesToday, totalEntries, successRate, ... } }
+      const resp = await apiClient.get<DataEnvelope<Record<string, unknown>>>('/analytics/overview', dateRange as Record<string, string>, signal);
+      const raw = resp.data ?? {};
+      const successRate = Number(raw.successRate ?? 0) / 100;
+      return {
+        totalEntries: Number(raw.totalEntries ?? 0),
+        successRate,
+        totalCost: Number(raw.costsToday ?? 0),
+        totalWins: Array.isArray(raw.recentWins) ? (raw.recentWins as unknown[]).length : 0,
+        totalPrizeValue: 0,
+        roi: 0,
+        costBreakdown: {
+          captcha: 0,
+          proxy: 0,
+          sms: 0,
+          email: 0,
+          other: Number(raw.costsToday ?? 0),
+        },
+        topSources: [],
+      } as AnalyticsOverview;
+    },
     staleTime: 120_000,
   });
 }
@@ -371,8 +552,19 @@ export function useAnalyticsOverview(dateRange?: { from: string; to: string }) {
 export function useEntryTimeSeries(dateRange?: { from: string; to: string }) {
   return useQuery({
     queryKey: queryKeys.analytics.timeSeries(dateRange),
-    queryFn: ({ signal }) =>
-      apiClient.get<EntryTimeSeriesPoint[]>('/analytics/entries/timeseries', dateRange as Record<string, string>, signal),
+    queryFn: async ({ signal }) => {
+      // Backend returns { data: [{ period, total, successful, failed }], meta: {...} }
+      const resp = await apiClient.get<{
+        data: Array<{ period: string; total: number; successful: number; failed: number }>;
+      }>('/analytics/entries', dateRange as Record<string, string>, signal);
+      const points = resp.data ?? [];
+      return points.map((p) => ({
+        date: p.period,
+        successful: p.successful ?? 0,
+        failed: p.failed ?? 0,
+        total: p.total ?? 0,
+      })) as EntryTimeSeriesPoint[];
+    },
     staleTime: 120_000,
   });
 }
@@ -380,8 +572,17 @@ export function useEntryTimeSeries(dateRange?: { from: string; to: string }) {
 export function useSuccessRateTimeSeries(dateRange?: { from: string; to: string }) {
   return useQuery({
     queryKey: queryKeys.analytics.successRate(dateRange),
-    queryFn: ({ signal }) =>
-      apiClient.get<SuccessRatePoint[]>('/analytics/success-rate', dateRange as Record<string, string>, signal),
+    queryFn: async ({ signal }) => {
+      // Reuse the entry time series endpoint and derive success rate
+      const resp = await apiClient.get<{
+        data: Array<{ period: string; total: number; successful: number; failed: number }>;
+      }>('/analytics/entries', dateRange as Record<string, string>, signal);
+      const points = resp.data ?? [];
+      return points.map((p) => ({
+        date: p.period,
+        rate: p.total > 0 ? p.successful / p.total : 0,
+      })) as SuccessRatePoint[];
+    },
     staleTime: 120_000,
   });
 }
@@ -389,8 +590,27 @@ export function useSuccessRateTimeSeries(dateRange?: { from: string; to: string 
 export function useWinHistory(dateRange?: { from: string; to: string }) {
   return useQuery({
     queryKey: queryKeys.analytics.winHistory(dateRange),
-    queryFn: ({ signal }) =>
-      apiClient.get<WinHistoryPoint[]>('/analytics/wins', dateRange as Record<string, string>, signal),
+    queryFn: async ({ signal }) => {
+      // Backend returns a paginated response from /analytics/wins
+      const resp = await apiClient.get<{
+        data: Array<{ createdAt?: string; prizeValue?: number; [key: string]: unknown }>;
+      }>('/analytics/wins', dateRange as Record<string, string>, signal);
+      const wins = resp.data ?? [];
+      // Group wins by month for the chart
+      const byMonth = new Map<string, { wins: number; prizeValue: number }>();
+      for (const w of wins) {
+        const d = w.createdAt ? w.createdAt.substring(0, 7) : 'unknown';
+        const existing = byMonth.get(d) ?? { wins: 0, prizeValue: 0 };
+        existing.wins += 1;
+        existing.prizeValue += Number(w.prizeValue ?? 0);
+        byMonth.set(d, existing);
+      }
+      return Array.from(byMonth.entries()).map(([date, v]) => ({
+        date,
+        wins: v.wins,
+        prizeValue: v.prizeValue,
+      })) as WinHistoryPoint[];
+    },
     staleTime: 120_000,
   });
 }
@@ -402,7 +622,11 @@ export function useWinHistory(dateRange?: { from: string; to: string }) {
 export function useSettings() {
   return useQuery({
     queryKey: queryKeys.settings.all,
-    queryFn: ({ signal }) => apiClient.get<SettingsData>('/settings', undefined, signal),
+    queryFn: async ({ signal }) => {
+      // Backend returns { data: { general: {...}, captcha: {...}, ... } }
+      const resp = await apiClient.get<DataEnvelope<SettingsData>>('/settings', undefined, signal);
+      return resp.data;
+    },
     staleTime: 300_000,
   });
 }
@@ -411,7 +635,7 @@ export function useUpdateSettings() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (input: Partial<SettingsData>) =>
-      apiClient.patch<SettingsData>('/settings', input),
+      apiClient.put<DataEnvelope<SettingsData>>('/settings', input),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.settings.all });
     },
@@ -425,7 +649,11 @@ export function useUpdateSettings() {
 export function useDiscoverySources() {
   return useQuery({
     queryKey: queryKeys.discovery.sources(),
-    queryFn: ({ signal }) => apiClient.get<DiscoverySource[]>('/discovery/sources', undefined, signal),
+    queryFn: async ({ signal }) => {
+      // Backend returns { data: sources[] }
+      const resp = await apiClient.get<DataEnvelope<DiscoverySource[]>>('/discovery/sources', undefined, signal);
+      return resp.data ?? [];
+    },
     staleTime: 120_000,
   });
 }
@@ -452,4 +680,6 @@ export type {
   SettingsData,
   DiscoverySource,
   PaginatedResponse,
+  EntryStats,
+  QueueMetrics,
 };
