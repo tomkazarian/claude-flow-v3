@@ -68,6 +68,12 @@ async function main(): Promise<void> {
     const { createServer } = await import('./server.js');
     const app = await createServer();
 
+    // Capture the graceful shutdown function for global error handlers
+    const shutdownFn = (app as unknown as Record<string, unknown>)['gracefulShutdown'];
+    if (typeof shutdownFn === 'function') {
+      appShutdown = shutdownFn as (reason: string) => Promise<void>;
+    }
+
     const host = '0.0.0.0';
     const port = env.PORT;
 
@@ -103,17 +109,34 @@ async function main(): Promise<void> {
 // Global error handlers
 // ---------------------------------------------------------------------------
 
+// Reference to the app's graceful shutdown function, set after server creation
+let appShutdown: ((reason: string) => Promise<void>) | undefined;
+
 process.on('uncaughtException', (error: Error) => {
-  logger.fatal({ err: error }, 'Uncaught exception');
-  process.exit(1);
+  logger.fatal({ err: error }, 'Uncaught exception - initiating graceful shutdown');
+  if (appShutdown) {
+    void appShutdown('uncaughtException');
+  } else {
+    process.exit(1);
+  }
 });
 
 process.on('unhandledRejection', (reason: unknown) => {
-  logger.fatal({ err: reason }, 'Unhandled rejection');
-  process.exit(1);
+  logger.fatal({ err: reason }, 'Unhandled rejection - initiating graceful shutdown');
+  if (appShutdown) {
+    void appShutdown('unhandledRejection');
+  } else {
+    process.exit(1);
+  }
 });
 
 // ---------------------------------------------------------------------------
 // Start
 // ---------------------------------------------------------------------------
-void main();
+void main().then(() => {
+  // After the server starts, capture the graceful shutdown reference.
+  // The shutdown function is attached to the app instance by createServer.
+  // Since main() uses dynamic imports, we re-import to access the app.
+}).catch(() => {
+  // main() handles its own errors
+});

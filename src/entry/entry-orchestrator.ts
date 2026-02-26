@@ -7,11 +7,12 @@
  * recording. Emits events throughout the flow for monitoring.
  */
 
+import { mkdirSync } from 'node:fs';
 import { getLogger } from '../shared/logger.js';
 import { eventBus } from '../shared/events.js';
 import { EntryError, ComplianceError } from '../shared/errors.js';
 import { generateId } from '../shared/crypto.js';
-import { ENTRY_STATUSES, DEFAULT_LIMITS } from '../shared/constants.js';
+import { ENTRY_STATUSES, DEFAULT_LIMITS, PATHS } from '../shared/constants.js';
 import { sleep } from '../shared/timing.js';
 import { parseDate } from '../shared/utils.js';
 import { FormAnalyzer } from './form-analyzer.js';
@@ -27,6 +28,13 @@ import type {
 } from './types.js';
 
 const log = getLogger('entry', { component: 'orchestrator' });
+
+// Ensure the screenshots directory exists at module load time
+try {
+  mkdirSync(PATHS.SCREENSHOTS, { recursive: true });
+} catch {
+  // Best-effort; directory creation errors are handled at write time
+}
 
 // ---------------------------------------------------------------------------
 // Default entry options
@@ -103,19 +111,38 @@ export class EntryOrchestrator {
         entryId,
         contestId: contest.id,
         profileId: profile.id,
-        url: contest.url,
+        contestUrl: contest.url,
         contestType: contest.type,
         entryMethod: contest.entryMethod,
+        proxyId: opts.proxyId || null,
+        timeoutMs: opts.timeoutMs,
+        maxRetries: opts.maxRetries,
       },
-      'Starting entry flow',
+      'Entry START',
     );
 
     // Step 1: Compliance checks
     try {
       await this.checkCompliance(contest, profile);
+      log.info(
+        {
+          entryId,
+          contestId: contest.id,
+          profileId: profile.id,
+          ageRequirement: contest.ageRequirement,
+          geoRestrictionCount: contest.geoRestrictions.length,
+          legitimacyScore: contest.legitimacyScore,
+        },
+        'Compliance check passed',
+      );
     } catch (error) {
+      const code = error instanceof ComplianceError ? error.code : 'UNKNOWN';
+      const rule = error instanceof ComplianceError ? error.rule : undefined;
       const message = error instanceof Error ? error.message : String(error);
-      log.warn({ entryId, error: message }, 'Compliance check failed');
+      log.warn(
+        { entryId, contestId: contest.id, profileId: profile.id, complianceCode: code, complianceRule: rule, error: message },
+        'Compliance check failed - entry skipped',
+      );
 
       return this.buildFailureResult(
         entryId, contest.id, profile.id, ENTRY_STATUSES.SKIPPED,
@@ -126,12 +153,28 @@ export class EntryOrchestrator {
     // Step 2: Check entry limits
     const canEnter = await this.recorder.checkEntryLimit(contest.id, profile.id);
     if (!canEnter) {
-      log.info({ entryId, contestId: contest.id }, 'Entry limit reached');
+      log.info(
+        { entryId, contestId: contest.id, profileId: profile.id, entryFrequency: contest.entryFrequency },
+        'Entry limit reached - entry skipped',
+      );
       return this.buildFailureResult(
         entryId, contest.id, profile.id, ENTRY_STATUSES.SKIPPED,
         'Entry limit reached for this contest', startTime, errors,
       );
     }
+
+    // Profile selected for entry
+    log.info(
+      {
+        entryId,
+        contestId: contest.id,
+        profileId: profile.id,
+        profileCountry: profile.country,
+        contestType: contest.type,
+        entryMethod: contest.entryMethod,
+      },
+      'Profile selected for entry - all pre-checks passed',
+    );
 
     // Step 3: Acquire browser context
     let browserContext: BrowserContext | null = null;
@@ -174,8 +217,9 @@ export class EntryOrchestrator {
       // Record the entry
       await this.recorder.record(result);
 
-      // Update entry limits if successful
-      if (result.status === ENTRY_STATUSES.CONFIRMED || result.status === ENTRY_STATUSES.SUBMITTED) {
+      // Update entry limits ONLY for confirmed entries.
+      // SUBMITTED entries may not have been accepted and should not count against limits.
+      if (result.status === ENTRY_STATUSES.CONFIRMED) {
         await this.recorder.updateEntryLimit(
           contest.id, profile.id, contest.entryFrequency,
         );
@@ -184,19 +228,36 @@ export class EntryOrchestrator {
       return result;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      const isTimeout = error instanceof EntryError && error.code === 'ENTRY_TIMEOUT';
       errors.push(message);
+
+      log.warn(
+        {
+          entryId,
+          contestId: contest.id,
+          profileId: profile.id,
+          errorType: isTimeout ? 'timeout' : 'execution_error',
+          errorMessage: message,
+          attemptDurationMs: Date.now() - startTime,
+          maxRetries: opts.maxRetries,
+          errorsAccumulated: errors.length,
+        },
+        'Entry execution failed',
+      );
 
       // Take failure screenshot
       let screenshotPath: string | undefined;
       if (opts.takeScreenshots) {
         try {
+          const ts = Date.now();
+          screenshotPath = `./data/screenshots/error_${entryId}_${ts}.png`;
           await page.screenshot({
-            path: `./data/screenshots/error_${entryId}_${Date.now()}.png`,
+            path: screenshotPath,
             fullPage: false,
           });
-          screenshotPath = `./data/screenshots/error_${entryId}_${Date.now()}.png`;
         } catch {
-          // Ignore screenshot errors
+          // Screenshot failure should not mask the original error
+          screenshotPath = undefined;
         }
       }
 
@@ -247,7 +308,19 @@ export class EntryOrchestrator {
     const analysis = await this.formAnalyzer.analyzeForm(page);
     const isMultiStep = analysis.isMultiStep;
 
-    // Select strategy
+    log.debug(
+      {
+        entryId,
+        contestId: contest.id,
+        isMultiStep,
+        hasCaptcha: analysis.hasCaptcha,
+        fieldCount: analysis.fields.length,
+        fieldNames: analysis.fields.map((f) => f.name),
+      },
+      'Form analysis complete',
+    );
+
+    // Select strategy based on entry method, contest type, and form structure
     const strategy = selectStrategy(
       contest.entryMethod,
       contest.type,
@@ -257,12 +330,16 @@ export class EntryOrchestrator {
     log.info(
       {
         entryId,
+        contestId: contest.id,
         strategy: strategy.name,
+        reason: `entryMethod=${contest.entryMethod}, contestType=${contest.type}, multiStep=${isMultiStep}`,
         entryMethod: contest.entryMethod,
         contestType: contest.type,
         isMultiStep,
+        hasCaptcha: analysis.hasCaptcha,
+        fieldCount: analysis.fields.length,
       },
-      'Strategy selected',
+      'Strategy selected for entry',
     );
 
     // Build execution context
@@ -282,6 +359,21 @@ export class EntryOrchestrator {
     });
 
     const result = await strategy.execute(context);
+
+    log.info(
+      {
+        entryId,
+        contestId: contest.id,
+        success: result.status === ENTRY_STATUSES.CONFIRMED,
+        status: result.status,
+        durationMs: result.durationMs,
+        captchaSolved: !result.errors.some((e) => e.startsWith('CAPTCHA:')),
+        proxyUsed: !!options.proxyId,
+        errorMessage: result.status === ENTRY_STATUSES.FAILED ? result.message : undefined,
+        confirmationNumber: result.confirmationNumber,
+      },
+      'Entry RESULT',
+    );
 
     if (result.status === ENTRY_STATUSES.CONFIRMED) {
       eventBus.emit('entry:submitted', {
@@ -332,9 +424,18 @@ export class EntryOrchestrator {
    * Perform compliance checks before attempting entry.
    */
   private async checkCompliance(contest: Contest, profile: Profile): Promise<void> {
+    log.debug(
+      { contestId: contest.id, profileId: profile.id },
+      'Starting compliance checks',
+    );
+
     // Check age requirement
     if (contest.ageRequirement !== null) {
       const age = this.calculateAge(profile.dateOfBirth);
+      log.debug(
+        { contestId: contest.id, profileAge: age, requiredAge: contest.ageRequirement },
+        'Age requirement check',
+      );
       if (age !== null && age < contest.ageRequirement) {
         throw new ComplianceError(
           `Profile age ${age} does not meet minimum age requirement of ${contest.ageRequirement}`,
@@ -384,6 +485,11 @@ export class EntryOrchestrator {
       }
     }
 
+    log.debug(
+      { contestId: contest.id, profileCountry: profile.country, profileState: profile.state },
+      'Geographic restriction check passed',
+    );
+
     // Check if contest has expired
     if (contest.endDate) {
       const endDate = contest.endDate instanceof Date
@@ -399,6 +505,11 @@ export class EntryOrchestrator {
         );
       }
     }
+
+    log.debug(
+      { contestId: contest.id, endDate: contest.endDate },
+      'Expiration check passed',
+    );
 
     // Check legitimacy score
     if (contest.legitimacyScore < 0.35) {
@@ -441,6 +552,18 @@ export class EntryOrchestrator {
     screenshotPath?: string,
   ): EntryResult {
     const durationMs = Date.now() - startTime;
+
+    log.info(
+      {
+        entryId,
+        contestId,
+        success: false,
+        status,
+        durationMs,
+        errorMessage: message,
+      },
+      'Entry RESULT',
+    );
 
     eventBus.emit('entry:failed', { entryId, error: message });
 

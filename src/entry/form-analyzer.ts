@@ -223,6 +223,30 @@ export class FormAnalyzer {
           return;
         }
 
+        // Skip honeypot fields that are visually hidden via CSS
+        const style = window.getComputedStyle(htmlEl);
+        if (
+          style.display === 'none' ||
+          style.visibility === 'hidden' ||
+          style.opacity === '0' ||
+          htmlEl.offsetWidth === 0 ||
+          htmlEl.offsetHeight === 0
+        ) {
+          return;
+        }
+
+        // Skip fields positioned off-screen (common honeypot technique)
+        if (style.position === 'absolute') {
+          const left = parseInt(style.left, 10);
+          const top = parseInt(style.top, 10);
+          if (
+            (!isNaN(left) && left < -1000) ||
+            (!isNaN(top) && top < -1000)
+          ) {
+            return;
+          }
+        }
+
         const name = htmlEl.name ?? '';
         const id = htmlEl.id ?? '';
         const placeholder = (htmlEl as HTMLInputElement).placeholder ?? '';

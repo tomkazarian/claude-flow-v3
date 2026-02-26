@@ -182,21 +182,29 @@ export class CaptchaSolver {
     page: Page,
     provider: CaptchaServiceProvider,
   ): Promise<{ token?: string; solution?: string; cost: number }> {
-    const timeoutPromise = new Promise<never>((_, reject) => {
-      setTimeout(
-        () => reject(new CaptchaError(
-          `CAPTCHA solve timed out after ${this.config.timeoutMs}ms`,
-          'CAPTCHA_TIMEOUT',
-          detection.type,
-          provider.name,
-        )),
-        this.config.timeoutMs,
-      );
-    });
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
 
-    const solvePromise = this.dispatchSolve(detection, page, provider);
+    try {
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        timeoutId = setTimeout(
+          () => reject(new CaptchaError(
+            `CAPTCHA solve timed out after ${this.config.timeoutMs}ms`,
+            'CAPTCHA_TIMEOUT',
+            detection.type,
+            provider.name,
+          )),
+          this.config.timeoutMs,
+        );
+      });
 
-    return Promise.race([solvePromise, timeoutPromise]);
+      const solvePromise = this.dispatchSolve(detection, page, provider);
+
+      return await Promise.race([solvePromise, timeoutPromise]);
+    } finally {
+      if (timeoutId !== undefined) {
+        clearTimeout(timeoutId);
+      }
+    }
   }
 
   /**

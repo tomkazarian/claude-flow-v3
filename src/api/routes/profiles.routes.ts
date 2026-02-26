@@ -2,7 +2,7 @@ import type { FastifyInstance, FastifyReply } from 'fastify';
 import { eq, desc, sql, count as countFn } from 'drizzle-orm';
 import { getDb } from '../../db/index.js';
 import { schema } from '../../db/index.js';
-import { generateId, encrypt, decrypt } from '../../shared/crypto.js';
+import { generateId } from '../../shared/crypto.js';
 import { AppError } from '../../shared/errors.js';
 import { getLogger } from '../../shared/logger.js';
 import { validateBody, validateParams } from '../middleware/validator.js';
@@ -16,40 +16,13 @@ import {
 
 const logger = getLogger('server', { component: 'profiles' });
 
-/** Fields considered PII that should be encrypted at rest. */
-const PII_FIELDS = ['email', 'phone', 'addressLine1', 'addressLine2'] as const;
-
-/**
- * Decrypts PII fields on a profile row for API output.
- */
-function decryptProfile(row: Record<string, unknown>): Record<string, unknown> {
-  const result = { ...row };
-  for (const field of PII_FIELDS) {
-    const value = result[field];
-    if (typeof value === 'string' && value.includes(':')) {
-      try {
-        result[field] = decrypt(value);
-      } catch {
-        // If decryption fails, the value may not be encrypted (e.g., legacy data)
-      }
-    }
-  }
-  return result;
-}
-
-/**
- * Encrypts PII fields for storage.
- */
-function encryptPiiFields(data: Record<string, unknown>): Record<string, unknown> {
-  const result = { ...data };
-  for (const field of PII_FIELDS) {
-    const value = result[field];
-    if (typeof value === 'string' && value.length > 0) {
-      result[field] = encrypt(value);
-    }
-  }
-  return result;
-}
+// NOTE: PII encryption/decryption was previously duplicated here, encrypting
+// email and phone in addition to the address fields that ProfileManager
+// encrypts. This caused data corruption: the same field could be encrypted
+// once (via ProfileManager) or twice (via routes + ProfileManager), making
+// decryption inconsistent. ProfileManager is now the single source of truth
+// for PII encryption (it encrypts only addressLine1 and addressLine2).
+// The routes layer passes data through without additional encryption.
 
 /**
  * Profile CRUD routes.
@@ -64,10 +37,7 @@ export async function profileRoutes(app: FastifyInstance): Promise<void> {
       .from(schema.profiles)
       .orderBy(desc(schema.profiles.createdAt));
 
-    // Decrypt PII for the response
-    const decrypted = profileRows.map((row) => decryptProfile(row as Record<string, unknown>));
-
-    return reply.send({ data: decrypted });
+    return reply.send({ data: profileRows });
   });
 
   // GET /:id - Get profile with decrypted PII
@@ -88,13 +58,11 @@ export async function profileRoutes(app: FastifyInstance): Promise<void> {
         throw new AppError('Profile not found', 'PROFILE_NOT_FOUND', 404);
       }
 
-      const decrypted = decryptProfile(rows[0] as Record<string, unknown>);
-
-      return reply.send({ data: decrypted });
+      return reply.send({ data: rows[0] });
     },
   );
 
-  // POST / - Create profile with PII encryption
+  // POST / - Create profile (PII encryption handled by ProfileManager)
   app.post(
     '/',
     { preHandler: [validateBody(createProfileSchema)] },
@@ -105,19 +73,20 @@ export async function profileRoutes(app: FastifyInstance): Promise<void> {
       const id = generateId();
       const now = new Date().toISOString();
 
-      // Encrypt PII fields
-      const encrypted = encryptPiiFields(body as Record<string, unknown>);
-
+      // Store data without route-level encryption. PII encryption for
+      // addressLine1/addressLine2 is handled by ProfileManager. Direct
+      // DB inserts from routes store plaintext for email/phone fields,
+      // matching ProfileManager's behavior.
       await db.insert(schema.profiles).values({
         id,
         firstName: body.firstName,
         lastName: body.lastName,
-        email: encrypted['email'] as string,
+        email: body.email,
         emailAliases: JSON.stringify(body.emailAliases ?? []),
-        phone: (encrypted['phone'] as string) ?? null,
+        phone: body.phone ?? null,
         phoneProvider: body.phoneProvider ?? null,
-        addressLine1: (encrypted['addressLine1'] as string) ?? null,
-        addressLine2: (encrypted['addressLine2'] as string) ?? null,
+        addressLine1: body.addressLine1 ?? null,
+        addressLine2: body.addressLine2 ?? null,
         city: body.city ?? null,
         state: body.state ?? null,
         zip: body.zip ?? null,
@@ -136,11 +105,9 @@ export async function profileRoutes(app: FastifyInstance): Promise<void> {
         .where(eq(schema.profiles.id, id))
         .limit(1);
 
-      const decrypted = decryptProfile(created[0] as Record<string, unknown>);
-
       logger.info({ profileId: id }, 'Profile created');
 
-      return reply.status(201).send({ data: decrypted });
+      return reply.status(201).send({ data: created[0] });
     },
   );
 
@@ -163,7 +130,6 @@ export async function profileRoutes(app: FastifyInstance): Promise<void> {
         throw new AppError('Profile not found', 'PROFILE_NOT_FOUND', 404);
       }
 
-      const encrypted = encryptPiiFields(body as Record<string, unknown>);
       const now = new Date().toISOString();
 
       await db
@@ -171,12 +137,12 @@ export async function profileRoutes(app: FastifyInstance): Promise<void> {
         .set({
           firstName: body.firstName,
           lastName: body.lastName,
-          email: encrypted['email'] as string,
+          email: body.email,
           emailAliases: JSON.stringify(body.emailAliases ?? []),
-          phone: (encrypted['phone'] as string) ?? null,
+          phone: body.phone ?? null,
           phoneProvider: body.phoneProvider ?? null,
-          addressLine1: (encrypted['addressLine1'] as string) ?? null,
-          addressLine2: (encrypted['addressLine2'] as string) ?? null,
+          addressLine1: body.addressLine1 ?? null,
+          addressLine2: body.addressLine2 ?? null,
           city: body.city ?? null,
           state: body.state ?? null,
           zip: body.zip ?? null,
@@ -194,11 +160,9 @@ export async function profileRoutes(app: FastifyInstance): Promise<void> {
         .where(eq(schema.profiles.id, id))
         .limit(1);
 
-      const decrypted = decryptProfile(updated[0] as Record<string, unknown>);
-
       logger.info({ profileId: id }, 'Profile fully updated');
 
-      return reply.send({ data: decrypted });
+      return reply.send({ data: updated[0] });
     },
   );
 
@@ -225,17 +189,16 @@ export async function profileRoutes(app: FastifyInstance): Promise<void> {
         updatedAt: new Date().toISOString(),
       };
 
-      // Encrypt PII fields if they are being updated
-      const encrypted = encryptPiiFields(body as Record<string, unknown>);
-
+      // Pass values through without route-level encryption. ProfileManager
+      // is the single source of truth for PII encryption.
       if (body.firstName !== undefined) updateValues['firstName'] = body.firstName;
       if (body.lastName !== undefined) updateValues['lastName'] = body.lastName;
-      if (body.email !== undefined) updateValues['email'] = encrypted['email'];
+      if (body.email !== undefined) updateValues['email'] = body.email;
       if (body.emailAliases !== undefined) updateValues['emailAliases'] = JSON.stringify(body.emailAliases);
-      if (body.phone !== undefined) updateValues['phone'] = encrypted['phone'];
+      if (body.phone !== undefined) updateValues['phone'] = body.phone;
       if (body.phoneProvider !== undefined) updateValues['phoneProvider'] = body.phoneProvider;
-      if (body.addressLine1 !== undefined) updateValues['addressLine1'] = encrypted['addressLine1'];
-      if (body.addressLine2 !== undefined) updateValues['addressLine2'] = encrypted['addressLine2'];
+      if (body.addressLine1 !== undefined) updateValues['addressLine1'] = body.addressLine1;
+      if (body.addressLine2 !== undefined) updateValues['addressLine2'] = body.addressLine2;
       if (body.city !== undefined) updateValues['city'] = body.city;
       if (body.state !== undefined) updateValues['state'] = body.state;
       if (body.zip !== undefined) updateValues['zip'] = body.zip;
@@ -256,11 +219,9 @@ export async function profileRoutes(app: FastifyInstance): Promise<void> {
         .where(eq(schema.profiles.id, id))
         .limit(1);
 
-      const decrypted = decryptProfile(updated[0] as Record<string, unknown>);
-
       logger.info({ profileId: id }, 'Profile partially updated');
 
-      return reply.send({ data: decrypted });
+      return reply.send({ data: updated[0] });
     },
   );
 

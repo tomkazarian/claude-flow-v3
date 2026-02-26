@@ -11,9 +11,13 @@ export const paginationSchema = z.object({
 
 export type PaginationInput = z.infer<typeof paginationSchema>;
 
+const isoDateString = z.string()
+  .regex(/^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}:\d{2}(\.\d{3})?Z)?$/, 'Expected ISO-8601 date format')
+  .refine((s) => !isNaN(new Date(s).getTime()), 'Invalid date value');
+
 export const dateRangeSchema = z.object({
-  from: z.string().optional(),
-  to: z.string().optional(),
+  from: isoDateString.optional(),
+  to: isoDateString.optional(),
 });
 
 export type DateRangeInput = z.infer<typeof dateRangeSchema>;

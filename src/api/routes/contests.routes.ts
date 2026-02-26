@@ -60,7 +60,8 @@ export async function contestRoutes(app: FastifyInstance): Promise<void> {
       }
 
       if (search) {
-        conditions.push(like(schema.contests.title, `%${search}%`));
+        const escaped = search.replace(/[%_]/g, '\\$&');
+        conditions.push(like(schema.contests.title, `%${escaped}%`));
       }
 
       if (minPriority !== undefined) {
@@ -500,21 +501,26 @@ export async function contestRoutes(app: FastifyInstance): Promise<void> {
       }
 
       const now = new Date().toISOString();
-      const results: Array<{ entryId: string; contestId: string }> = [];
 
-      for (const contestId of contestIds) {
-        const entryId = generateId();
-        await db.insert(schema.entries).values({
-          id: entryId,
-          contestId,
-          profileId,
-          status: 'pending',
-          attemptNumber: 1,
-          createdAt: now,
-          updatedAt: now,
-        });
-        results.push({ entryId, contestId });
-      }
+      // Wrap all inserts in a transaction so either all entries are created
+      // or none are, preventing partial bulk-enter state.
+      const results = db.transaction((tx) => {
+        const txResults: Array<{ entryId: string; contestId: string }> = [];
+        for (const contestId of contestIds) {
+          const entryId = generateId();
+          tx.insert(schema.entries).values({
+            id: entryId,
+            contestId,
+            profileId,
+            status: 'pending',
+            attemptNumber: 1,
+            createdAt: now,
+            updatedAt: now,
+          }).run();
+          txResults.push({ entryId, contestId });
+        }
+        return txResults;
+      });
 
       logger.info(
         { profileId, contestCount: contestIds.length },

@@ -1,5 +1,6 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { eq } from 'drizzle-orm';
+import { z } from 'zod';
 import { getDb } from '../../db/index.js';
 import { schema } from '../../db/index.js';
 import { getLogger } from '../../shared/logger.js';
@@ -92,6 +93,31 @@ async function setSettingValue(key: string, value: Record<string, unknown>): Pro
   }
 }
 
+// ---------------------------------------------------------------------------
+// Zod schemas for individual settings sub-routes
+// ---------------------------------------------------------------------------
+
+const captchaSettingsSchema = z.object({
+  provider: z.enum(['2captcha', 'anticaptcha', 'capsolver']).optional(),
+  apiKey: z.string().optional(),
+  timeout: z.number().positive().optional(),
+  maxRetries: z.number().int().positive().optional(),
+}).passthrough();
+
+const scheduleSettingsSchema = z.object({
+  enabled: z.boolean().optional(),
+  startHour: z.number().int().min(0).max(23).optional(),
+  endHour: z.number().int().min(0).max(23).optional(),
+  maxEntriesPerDay: z.number().int().positive().optional(),
+  daysOfWeek: z.array(z.number().int().min(0).max(6)).optional(),
+}).passthrough();
+
+const proxySettingsSchema = z.object({
+  enabled: z.boolean().optional(),
+  rotationStrategy: z.enum(['round-robin', 'random', 'least-used', 'geo-matched', 'sticky']).optional(),
+  healthCheckInterval: z.number().positive().optional(),
+}).passthrough();
+
 /**
  * App settings routes.
  */
@@ -154,7 +180,10 @@ export async function settingsRoutes(app: FastifyInstance): Promise<void> {
   });
 
   // PUT /captcha - Update CAPTCHA config
-  app.put('/captcha', async (request, reply: FastifyReply) => {
+  app.put(
+    '/captcha',
+    { preHandler: [validateBody(captchaSettingsSchema)] },
+    async (request, reply: FastifyReply) => {
     const body = request.body as Record<string, unknown>;
     const current = await getSettingValue('captcha');
     const merged = { ...current, ...body };
@@ -163,7 +192,8 @@ export async function settingsRoutes(app: FastifyInstance): Promise<void> {
     logger.info('CAPTCHA settings updated');
 
     return reply.send({ data: merged });
-  });
+  },
+  );
 
   // GET /schedule - Scheduling config
   app.get('/schedule', async (_request, reply: FastifyReply) => {
@@ -172,7 +202,10 @@ export async function settingsRoutes(app: FastifyInstance): Promise<void> {
   });
 
   // PUT /schedule - Update scheduling config
-  app.put('/schedule', async (request, reply: FastifyReply) => {
+  app.put(
+    '/schedule',
+    { preHandler: [validateBody(scheduleSettingsSchema)] },
+    async (request, reply: FastifyReply) => {
     const body = request.body as Record<string, unknown>;
     const current = await getSettingValue('schedule');
     const merged = { ...current, ...body };
@@ -181,7 +214,8 @@ export async function settingsRoutes(app: FastifyInstance): Promise<void> {
     logger.info('Schedule settings updated');
 
     return reply.send({ data: merged });
-  });
+  },
+  );
 
   // GET /proxy - Proxy configuration
   app.get('/proxy', async (_request, reply: FastifyReply) => {
@@ -190,7 +224,10 @@ export async function settingsRoutes(app: FastifyInstance): Promise<void> {
   });
 
   // PUT /proxy - Update proxy config
-  app.put('/proxy', async (request, reply: FastifyReply) => {
+  app.put(
+    '/proxy',
+    { preHandler: [validateBody(proxySettingsSchema)] },
+    async (request, reply: FastifyReply) => {
     const body = request.body as Record<string, unknown>;
     const current = await getSettingValue('proxy');
     const merged = { ...current, ...body };
@@ -199,5 +236,6 @@ export async function settingsRoutes(app: FastifyInstance): Promise<void> {
     logger.info('Proxy settings updated');
 
     return reply.send({ data: merged });
-  });
+  },
+  );
 }

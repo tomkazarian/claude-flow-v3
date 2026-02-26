@@ -5,6 +5,10 @@ import { paginationSchema, sortSchema } from './common.schema.js';
 // Contest Zod schemas for API boundary validation
 // ---------------------------------------------------------------------------
 
+const isoDateString = z.string()
+  .regex(/^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}:\d{2}(\.\d{3})?Z)?$/, 'Expected ISO-8601 date format')
+  .refine((s) => !isNaN(new Date(s).getTime()), 'Invalid date value');
+
 export const createContestSchema = z.object({
   url: z.string().url(),
   title: z.string().min(1).max(500).optional(),
@@ -20,8 +24,8 @@ export const createContestSchema = z.object({
   description: z.string().max(5000).optional(),
   source: z.string().max(100).optional(),
   sourceUrl: z.string().url().optional(),
-  startDate: z.string().optional(),
-  endDate: z.string().optional(),
+  startDate: isoDateString.optional(),
+  endDate: isoDateString.optional(),
   entryFrequency: z.enum(['once', 'daily', 'weekly', 'unlimited']).optional(),
   maxEntries: z.number().int().positive().optional(),
   prizeDescription: z.string().max(2000).optional(),
@@ -52,8 +56,8 @@ export const updateContestSchema = z.object({
     .enum(['sweepstakes', 'raffle', 'giveaway', 'instant_win', 'contest', 'daily'])
     .optional(),
   entryMethod: z.enum(['form', 'social', 'email', 'purchase', 'multi']).optional(),
-  startDate: z.string().optional(),
-  endDate: z.string().optional(),
+  startDate: isoDateString.optional(),
+  endDate: isoDateString.optional(),
   entryFrequency: z.enum(['once', 'daily', 'weekly', 'unlimited']).optional(),
   maxEntries: z.number().int().positive().optional(),
   prizeDescription: z.string().max(2000).optional(),

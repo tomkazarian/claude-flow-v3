@@ -119,9 +119,17 @@ export async function createContext(
 
   const context = await browser.newContext(contextOptions);
 
-  // Extra HTTP headers
-  if (extraHeaders) {
-    await context.setExtraHTTPHeaders(extraHeaders);
+  // Build merged HTTP headers: start with caller-supplied headers,
+  // then add Accept-Language derived from the fingerprint's language list
+  // so that the HTTP header matches the navigator.languages spoof.
+  const mergedHeaders: Record<string, string> = { ...(extraHeaders ?? {}) };
+
+  if (fingerprint && !mergedHeaders['Accept-Language']) {
+    mergedHeaders['Accept-Language'] = buildAcceptLanguageHeader(fingerprint.languages);
+  }
+
+  if (Object.keys(mergedHeaders).length > 0) {
+    await context.setExtraHTTPHeaders(mergedHeaders);
   }
 
   // Inject all stealth scripts
@@ -166,6 +174,22 @@ export async function createContext(
         configurable: true,
       });
     `);
+
+    // Fix headless tell: outerWidth === innerWidth. In real browsers the
+    // window chrome (toolbars, scrollbar) makes outer > inner. Add
+    // realistic offsets so fingerprinting scripts see the expected gap.
+    const outerWidthOffset = 10 + Math.floor(Math.random() * 7);   // 10-16px
+    const outerHeightOffset = 80 + Math.floor(Math.random() * 41); // 80-120px
+    await context.addInitScript(`
+      Object.defineProperty(window, 'outerWidth', {
+        get: function() { return window.innerWidth + ${outerWidthOffset}; },
+        configurable: true,
+      });
+      Object.defineProperty(window, 'outerHeight', {
+        get: function() { return window.innerHeight + ${outerHeightOffset}; },
+        configurable: true,
+      });
+    `);
   }
 
   logger.debug(
@@ -180,4 +204,25 @@ export async function createContext(
   );
 
   return context;
+}
+
+// ---------------------------------------------------------------------------
+// Internal helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Builds an Accept-Language header value from an array of language codes.
+ * The first language has no quality value (implicit q=1.0), subsequent
+ * languages receive decreasing q values: 0.8, 0.6, 0.4, etc.
+ *
+ * Example: ['ja-JP', 'ja', 'en-US', 'en'] => 'ja-JP,ja;q=0.8,en-US;q=0.6,en;q=0.4'
+ */
+function buildAcceptLanguageHeader(languages: string[]): string {
+  if (languages.length === 0) return 'en-US';
+
+  return languages.map((lang, i) => {
+    if (i === 0) return lang;
+    const q = Math.max(0.1, 1.0 - i * 0.2);
+    return `${lang};q=${q.toFixed(1)}`;
+  }).join(',');
 }

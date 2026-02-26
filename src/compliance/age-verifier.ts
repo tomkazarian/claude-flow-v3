@@ -62,10 +62,10 @@ export function verifyAge(dateOfBirth: string, minAge = DEFAULT_MIN_AGE): boolea
  */
 function calculateAge(dob: Date): number {
   const now = new Date();
-  let age = now.getFullYear() - dob.getFullYear();
+  let age = now.getUTCFullYear() - dob.getUTCFullYear();
 
-  const monthDiff = now.getMonth() - dob.getMonth();
-  if (monthDiff < 0 || (monthDiff === 0 && now.getDate() < dob.getDate())) {
+  const monthDiff = now.getUTCMonth() - dob.getUTCMonth();
+  if (monthDiff < 0 || (monthDiff === 0 && now.getUTCDate() < dob.getUTCDate())) {
     age--;
   }
 

@@ -11,6 +11,12 @@ import { getLogger } from '../shared/logger.js';
 const logger = getLogger('compliance', { component: 'geo-checker' });
 
 // ---------------------------------------------------------------------------
+// US territories mapping
+// ---------------------------------------------------------------------------
+
+const US_TERRITORIES = new Set(['US', 'PR', 'GU', 'VI', 'AS', 'MP']);
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -125,6 +131,12 @@ function matchesLocation(
   if (parts.length === 2) {
     // Format: "US-CA" (country-state)
     const [restrictionCountry, restrictionState] = parts as [string, string];
+
+    // Treat US territories as matching "US" country restriction
+    if (restrictionCountry === 'US' && US_TERRITORIES.has(country)) {
+      return state === restrictionState;
+    }
+
     return (
       country === restrictionCountry &&
       state === restrictionState
@@ -136,13 +148,18 @@ function matchesLocation(
 
     // If it is a 2-letter code, it could be a country or a state
     if (value.length === 2) {
-      // Match as country
+      // Match as country (including US territory mapping)
       if (value === country) {
         return true;
       }
 
-      // If the profile is US and the restriction is a state code, match
-      if (country === 'US' && value === state) {
+      // Treat US territories as matching a "US" restriction
+      if (value === 'US' && US_TERRITORIES.has(country)) {
+        return true;
+      }
+
+      // If the profile is in the US (or US territory) and the restriction is a state code, match
+      if (US_TERRITORIES.has(country) && value === state) {
         return true;
       }
     }

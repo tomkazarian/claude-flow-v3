@@ -186,41 +186,12 @@ function buildUserAgents(): Array<{ ua: string; browser: string; version: number
     }
   }
 
-  // Firefox 120-130 on Windows
-  for (let v = 120; v <= 130; v++) {
-    agents.push({
-      ua: `Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:${v}.0) Gecko/20100101 Firefox/${v}.0`,
-      browser: 'firefox', version: v, osFamily: 'windows',
-    });
-  }
-
-  // Firefox 120-130 on macOS
-  for (let v = 120; v <= 130; v++) {
-    agents.push({
-      ua: `Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:${v}.0) Gecko/20100101 Firefox/${v}.0`,
-      browser: 'firefox', version: v, osFamily: 'macos',
-    });
-  }
-
-  // Edge 120-130 on Windows
-  for (let v = 120; v <= 130; v++) {
-    const buildNo = 2210 + (v - 120) * 30 + Math.floor(Math.random() * 30);
-    const chromeBuild = 6099 + (v - 120) * 50 + Math.floor(Math.random() * 50);
-    agents.push({
-      ua: `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${v}.0.${chromeBuild}.0 Safari/537.36 Edg/${v}.0.${buildNo}.0`,
-      browser: 'edge', version: v, osFamily: 'windows',
-    });
-  }
-
-  // Edge 120-130 on macOS
-  for (let v = 120; v <= 130; v++) {
-    const buildNo = 2210 + (v - 120) * 30 + Math.floor(Math.random() * 30);
-    const chromeBuild = 6099 + (v - 120) * 50 + Math.floor(Math.random() * 50);
-    agents.push({
-      ua: `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${v}.0.${chromeBuild}.0 Safari/537.36 Edg/${v}.0.${buildNo}.0`,
-      browser: 'edge', version: v, osFamily: 'macos',
-    });
-  }
+  // NOTE: Firefox and Edge UAs have been removed. The stealth scripts
+  // exclusively spoof Chrome-specific APIs (window.chrome, Chrome plugins,
+  // chrome.runtime, chrome.loadTimes, etc.). Emitting a Firefox or Edge
+  // user-agent while those APIs exist is an impossible combination that
+  // fingerprinting services detect immediately. Since the browser pool only
+  // launches Chromium, only Chrome UAs are appropriate.
 
   return agents;
 }

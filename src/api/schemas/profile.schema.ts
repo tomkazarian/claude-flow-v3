@@ -22,7 +22,11 @@ export const createProfileSchema = z.object({
   country: z.string().length(2).optional(),
   dateOfBirth: z
     .string()
-    .regex(/^\d{4}-\d{2}-\d{2}$/, 'Expected YYYY-MM-DD')
+    .regex(/^\d{4}-\d{2}-\d{2}$/, 'Expected YYYY-MM-DD format')
+    .refine((s) => {
+      const d = new Date(s + 'T00:00:00Z');
+      return !isNaN(d.getTime()) && d.toISOString().startsWith(s);
+    }, 'Invalid calendar date')
     .optional(),
   gender: z.string().max(20).optional(),
   socialAccounts: z.record(z.string(), z.string().optional()).optional(),

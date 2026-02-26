@@ -5,10 +5,18 @@
  */
 
 /**
+ * Options for stealth argument generation.
+ */
+export interface StealthArgsOptions {
+  /** When true, adds DNS leak prevention flags suitable for proxied traffic. */
+  useProxy?: boolean;
+}
+
+/**
  * Returns Chromium command-line flags that reduce detectable automation signals.
  */
-export function getStealthArgs(): string[] {
-  return [
+export function getStealthArgs(options?: StealthArgsOptions): string[] {
+  const args = [
     // Core automation-hiding flags
     '--disable-blink-features=AutomationControlled',
 
@@ -42,9 +50,22 @@ export function getStealthArgs(): string[] {
     '--no-first-run',
     '--safebrowsing-disable-auto-update',
 
+    // Prevent WebRTC from leaking real IP through STUN/TURN
+    '--webrtc-ip-handling-policy=disable_non_proxied_udp',
+
     // Window size (overridden per context, but keeps a sane default)
     '--window-size=1920,1080',
   ];
+
+  // DNS leak prevention: only when routing through a proxy
+  if (options?.useProxy) {
+    args.push(
+      '--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE localhost',
+      '--disable-features=DnsOverHttps',
+    );
+  }
+
+  return args;
 }
 
 /**
@@ -79,6 +100,18 @@ export function getStealthScripts(): string[] {
 
     // 9. Consistent hardware concurrency & device memory
     buildHardwareOverrides(),
+
+    // 10. WebRTC IP leak prevention
+    buildWebRTCMask(),
+
+    // 11. navigator.connection spoofing
+    buildNavigatorConnection(),
+
+    // 12. Performance.now() precision reduction
+    buildPerformanceNowPrecision(),
+
+    // 13. Battery API spoofing
+    buildBatterySpoof(),
   ];
 }
 
@@ -258,46 +291,60 @@ function buildWebGLMask(): string {
 }
 
 function buildCanvasNoise(): string {
+  // Generate a per-page-load seed at script-build time.
+  // Each call to getStealthScripts() produces a unique seed so different
+  // sessions have different fingerprints, but within a single page load
+  // repeated calls to toDataURL/toBlob on the same canvas are deterministic.
+  const seed = Math.floor(Math.random() * 2147483647);
+
   return `
-    // Inject tiny noise into canvas toDataURL / toBlob to vary fingerprint
-    const origToDataURL = HTMLCanvasElement.prototype.toDataURL;
-    HTMLCanvasElement.prototype.toDataURL = function(type, quality) {
-      const ctx = this.getContext('2d');
-      if (ctx && this.width > 0 && this.height > 0) {
+    // Deterministic canvas noise using a seeded PRNG (mulberry32).
+    // The seed is fixed for this page load so repeated calls produce
+    // identical output, but differs across sessions.
+    (function() {
+      const CANVAS_SEED = ${seed};
+
+      function mulberry32(s) {
+        return function() {
+          s = (s + 0x6D2B79F5) | 0;
+          var t = Math.imul(s ^ (s >>> 15), 1 | s);
+          t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        };
+      }
+
+      function applyNoise(canvas) {
+        var ctx = canvas.getContext('2d');
+        if (!ctx || canvas.width <= 0 || canvas.height <= 0) return;
         try {
-          const imageData = ctx.getImageData(0, 0, this.width, this.height);
-          const data = imageData.data;
-          // Flip a few random pixel channels by +/- 1
-          for (let i = 0; i < Math.min(10, data.length); i++) {
-            const idx = Math.floor(Math.random() * data.length);
-            data[idx] = Math.max(0, Math.min(255, data[idx] + (Math.random() > 0.5 ? 1 : -1)));
+          var imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+          var data = imageData.data;
+          // Reset PRNG to seed so identical canvas content always gets
+          // identical noise applied, making the output deterministic.
+          var rng = mulberry32(CANVAS_SEED);
+          var count = Math.min(10, data.length);
+          for (var i = 0; i < count; i++) {
+            var idx = Math.floor(rng() * data.length);
+            data[idx] = Math.max(0, Math.min(255, data[idx] + (rng() > 0.5 ? 1 : -1)));
           }
           ctx.putImageData(imageData, 0, 0);
         } catch (_e) {
           // Security exception on cross-origin canvas; ignore
         }
       }
-      return origToDataURL.call(this, type, quality);
-    };
 
-    const origToBlob = HTMLCanvasElement.prototype.toBlob;
-    HTMLCanvasElement.prototype.toBlob = function(cb, type, quality) {
-      const ctx = this.getContext('2d');
-      if (ctx && this.width > 0 && this.height > 0) {
-        try {
-          const imageData = ctx.getImageData(0, 0, this.width, this.height);
-          const data = imageData.data;
-          for (let i = 0; i < Math.min(10, data.length); i++) {
-            const idx = Math.floor(Math.random() * data.length);
-            data[idx] = Math.max(0, Math.min(255, data[idx] + (Math.random() > 0.5 ? 1 : -1)));
-          }
-          ctx.putImageData(imageData, 0, 0);
-        } catch (_e) {
-          // Ignore cross-origin canvas errors
-        }
-      }
-      return origToBlob.call(this, cb, type, quality);
-    };
+      var origToDataURL = HTMLCanvasElement.prototype.toDataURL;
+      HTMLCanvasElement.prototype.toDataURL = function(type, quality) {
+        applyNoise(this);
+        return origToDataURL.call(this, type, quality);
+      };
+
+      var origToBlob = HTMLCanvasElement.prototype.toBlob;
+      HTMLCanvasElement.prototype.toBlob = function(cb, type, quality) {
+        applyNoise(this);
+        return origToBlob.call(this, cb, type, quality);
+      };
+    })();
   `;
 }
 
@@ -375,5 +422,136 @@ function buildHardwareOverrides(): string {
         configurable: true,
       });
     }
+  `;
+}
+
+function buildWebRTCMask(): string {
+  return `
+    // Mask WebRTC to prevent real IP leakage through STUN/TURN candidates.
+    (function() {
+      function patchRTCPeerConnection(OrigRTC) {
+        if (!OrigRTC) return;
+
+        function PatchedRTC(config, constraints) {
+          // Strip STUN/TURN servers from the configuration so no
+          // external requests reveal the real IP address.
+          var cleanConfig = config ? Object.assign({}, config) : {};
+          cleanConfig.iceServers = [];
+
+          var pc = new OrigRTC(cleanConfig, constraints);
+
+          // Wrap onicecandidate to filter out host candidates that leak the real IP.
+          var origDescriptor = Object.getOwnPropertyDescriptor(OrigRTC.prototype, 'onicecandidate');
+          if (origDescriptor && origDescriptor.set) {
+            var origSetter = origDescriptor.set;
+            Object.defineProperty(pc, 'onicecandidate', {
+              set: function(handler) {
+                origSetter.call(pc, function(event) {
+                  if (event && event.candidate && event.candidate.candidate) {
+                    // Drop host candidates (typ host) which contain the real local IP
+                    if (event.candidate.candidate.indexOf('typ host') !== -1) {
+                      return;
+                    }
+                  }
+                  if (handler) handler(event);
+                });
+              },
+              get: function() { return origDescriptor.get ? origDescriptor.get.call(pc) : undefined; },
+              configurable: true,
+            });
+          }
+
+          return pc;
+        }
+
+        PatchedRTC.prototype = OrigRTC.prototype;
+        PatchedRTC.generateCertificate = OrigRTC.generateCertificate;
+        return PatchedRTC;
+      }
+
+      if (typeof RTCPeerConnection !== 'undefined') {
+        window.RTCPeerConnection = patchRTCPeerConnection(RTCPeerConnection);
+      }
+      if (typeof webkitRTCPeerConnection !== 'undefined') {
+        window.webkitRTCPeerConnection = patchRTCPeerConnection(webkitRTCPeerConnection);
+      }
+    })();
+  `;
+}
+
+function buildNavigatorConnection(): string {
+  return `
+    // Spoof navigator.connection with realistic values.
+    (function() {
+      var connectionData = {
+        effectiveType: '4g',
+        downlink: 10 + Math.floor(Math.random() * 40),
+        rtt: 50 + Math.floor(Math.random() * 100),
+        saveData: false,
+        type: 'wifi',
+        onchange: null,
+      };
+
+      // Freeze the values so they stay consistent within the page session.
+      var connection = {};
+      Object.keys(connectionData).forEach(function(key) {
+        Object.defineProperty(connection, key, {
+          get: function() { return connectionData[key]; },
+          configurable: true,
+          enumerable: true,
+        });
+      });
+
+      // Add addEventListener/removeEventListener stubs
+      connection.addEventListener = function() {};
+      connection.removeEventListener = function() {};
+
+      Object.defineProperty(navigator, 'connection', {
+        get: function() { return connection; },
+        configurable: true,
+        enumerable: true,
+      });
+    })();
+  `;
+}
+
+function buildPerformanceNowPrecision(): string {
+  return `
+    // Reduce performance.now() precision to ~100 microseconds.
+    // Headless browsers expose nanosecond precision which is detectable.
+    (function() {
+      var origPerformanceNow = performance.now.bind(performance);
+      performance.now = function() {
+        // Round to nearest 0.1ms (100 microseconds)
+        return Math.round(origPerformanceNow() * 10) / 10;
+      };
+    })();
+  `;
+}
+
+function buildBatterySpoof(): string {
+  return `
+    // Spoof the Battery API with realistic desktop values.
+    (function() {
+      var batteryData = {
+        charging: true,
+        chargingTime: 0,
+        dischargingTime: Infinity,
+        level: 0.5 + Math.random() * 0.5,  // 50-100%
+        addEventListener: function() {},
+        removeEventListener: function() {},
+        dispatchEvent: function() { return true; },
+        onchargingchange: null,
+        onchargingtimechange: null,
+        ondischargingtimechange: null,
+        onlevelchange: null,
+      };
+
+      if (navigator.getBattery) {
+        navigator.getBattery = function() {
+          return Promise.resolve(batteryData);
+        };
+      }
+    })();
   `;
 }

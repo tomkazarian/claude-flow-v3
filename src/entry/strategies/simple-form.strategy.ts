@@ -15,7 +15,10 @@ import { FormAnalyzer } from '../form-analyzer.js';
 import { FormFiller } from '../form-filler.js';
 import { CheckboxHandler } from '../checkbox-handler.js';
 import { ConfirmationHandler } from '../confirmation-handler.js';
+import { detectCaptcha } from '../../captcha/captcha-detector.js';
+import { CaptchaSolver } from '../../captcha/captcha-solver.js';
 import type { EntryStrategy, EntryContext, EntryResult } from '../types.js';
+import type { Page as PlaywrightPage } from 'playwright';
 
 const log = getLogger('entry', { component: 'simple-form-strategy' });
 
@@ -92,8 +95,13 @@ export class SimpleFormStrategy implements EntryStrategy {
         } catch (captchaError) {
           const msg = captchaError instanceof Error ? captchaError.message : String(captchaError);
           errors.push(`CAPTCHA: ${msg}`);
-          log.error({ error: msg }, 'CAPTCHA solving failed');
-          // Continue with submission attempt despite CAPTCHA failure
+          log.error({ error: msg }, 'CAPTCHA solving failed, aborting submission');
+          throw new EntryError(
+            `CAPTCHA solving failed: ${msg}`,
+            'CAPTCHA_FAILED',
+            contest.id,
+            entryId,
+          );
         }
       }
 
@@ -150,12 +158,11 @@ export class SimpleFormStrategy implements EntryStrategy {
       // Take failure screenshot
       let screenshotPath: string | undefined;
       try {
-        const screenshotBuffer = await page.screenshot({ fullPage: false });
-        if (screenshotBuffer) {
-          screenshotPath = `./data/screenshots/error_${entryId}_${Date.now()}.png`;
-        }
+        screenshotPath = `./data/screenshots/error_${entryId}_${Date.now()}.png`;
+        await page.screenshot({ path: screenshotPath, fullPage: false });
       } catch {
-        // Ignore screenshot errors
+        // Screenshot failure should not mask the original error
+        screenshotPath = undefined;
       }
 
       eventBus.emit('entry:failed', { entryId, error: message });
@@ -177,49 +184,34 @@ export class SimpleFormStrategy implements EntryStrategy {
   }
 
   /**
-   * Attempt to handle CAPTCHA on the page.
-   * This is a placeholder that emits events for the captcha module to handle.
+   * Detect the CAPTCHA type on the page, solve it, and inject the solution.
+   * Throws if no solver is available or if solving fails.
    */
   private async handleCaptcha(page: Page): Promise<void> {
-    eventBus.emit('captcha:solving', { type: 'unknown', provider: 'pending' });
+    // Detect the CAPTCHA type using the dedicated detector
+    const detection = await detectCaptcha(page as unknown as PlaywrightPage);
 
-    // Detect CAPTCHA type
-    const captchaType = await this.detectCaptchaType(page);
-    log.info({ captchaType }, 'CAPTCHA type detected');
-
-    // The actual CAPTCHA solving would be handled by the captcha module.
-    // This strategy emits the event and waits for the token to be injected.
-    // For now, we log and let the orchestrator handle it.
-    log.warn('CAPTCHA solving delegated to captcha module');
-  }
-
-  /**
-   * Detect the CAPTCHA type on the page.
-   */
-  private async detectCaptchaType(
-    page: import('../types.js').Page,
-  ): Promise<string> {
-    try {
-      const type = await page.evaluate(() => {
-        if (document.querySelector('.g-recaptcha') || document.querySelector('iframe[src*="recaptcha"]')) {
-          return 'recaptcha-v2';
-        }
-        if (document.querySelector('.h-captcha') || document.querySelector('iframe[src*="hcaptcha"]')) {
-          return 'hcaptcha';
-        }
-        if (document.querySelector('.cf-turnstile') || document.querySelector('iframe[src*="turnstile"]')) {
-          return 'turnstile';
-        }
-        if (document.querySelector('#captcha') || document.querySelector('.captcha')) {
-          return 'image-captcha';
-        }
-        return 'unknown';
-      }) as string;
-
-      return type;
-    } catch {
-      return 'unknown';
+    if (!detection) {
+      log.warn('CAPTCHA was expected but detector found none on the page');
+      return;
     }
+
+    log.info({ captchaType: detection.type, siteKey: detection.siteKey }, 'CAPTCHA detected, solving');
+    eventBus.emit('captcha:solving', { type: detection.type, provider: 'pending' });
+
+    // Create a solver instance and attempt to solve
+    const solver = new CaptchaSolver();
+
+    if (!solver) {
+      throw new EntryError(
+        'No CaptchaSolver is available. Ensure a CAPTCHA provider API key is configured.',
+        'CAPTCHA_NO_SOLVER',
+        '',
+      );
+    }
+
+    // solver.solve will throw CaptchaError if all providers fail or timeout
+    await solver.solve(detection, page as unknown as PlaywrightPage);
   }
 }
 

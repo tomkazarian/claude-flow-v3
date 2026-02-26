@@ -6,7 +6,7 @@
  * Uses the entry_limits table for persistence.
  */
 
-import { eq, and } from 'drizzle-orm';
+import { eq, and, sql } from 'drizzle-orm';
 import type { BetterSQLite3Database } from 'drizzle-orm/better-sqlite3';
 import { getLogger } from '../shared/logger.js';
 import { generateId } from '../shared/crypto.js';
@@ -135,6 +135,10 @@ export class EntryLimiter {
   /**
    * Records that a profile has submitted an entry to a contest.
    * Updates the entry count and computes the next eligible entry time.
+   *
+   * Uses an atomic upsert (INSERT ... ON CONFLICT DO UPDATE) to prevent
+   * the TOCTOU race condition where two concurrent workers could both
+   * see no existing row and both INSERT, causing a constraint violation.
    */
   async recordEntry(contestId: string, profileId: string): Promise<void> {
     const now = new Date().toISOString();
@@ -151,61 +155,30 @@ export class EntryLimiter {
     const frequency = (contest?.entryFrequency ?? 'once') as EntryFrequency;
     const nextEligibleAt = this.computeNextEligible(frequency);
 
-    // Check for existing record
-    const existingRows = this.db
-      .select()
-      .from(entryLimits)
-      .where(
-        and(
-          eq(entryLimits.contestId, contestId),
-          eq(entryLimits.profileId, profileId),
-        ),
-      )
-      .limit(1)
-      .all();
-
-    const existing = existingRows[0];
-
-    if (existing) {
-      // Update existing record
-      this.db
-        .update(entryLimits)
-        .set({
-          entryCount: existing.entryCount + 1,
+    // Atomic upsert - prevents race condition between concurrent workers.
+    // The unique index idx_entry_limits_contest_profile on (contestId, profileId)
+    // ensures that only one row exists per contest/profile pair.
+    this.db
+      .insert(entryLimits)
+      .values({
+        id: generateId(),
+        contestId,
+        profileId,
+        entryCount: 1,
+        lastEntryAt: now,
+        nextEligibleAt,
+      })
+      .onConflictDoUpdate({
+        target: [entryLimits.contestId, entryLimits.profileId],
+        set: {
+          entryCount: sql`${entryLimits.entryCount} + 1`,
           lastEntryAt: now,
-          nextEligibleAt,
-        })
-        .where(eq(entryLimits.id, existing.id))
-        .run();
-
-      logger.debug(
-        {
-          contestId,
-          profileId,
-          entryCount: existing.entryCount + 1,
           nextEligibleAt,
         },
-        'Entry limit record updated',
-      );
-    } else {
-      // Create new record
-      this.db
-        .insert(entryLimits)
-        .values({
-          id: generateId(),
-          contestId,
-          profileId,
-          entryCount: 1,
-          lastEntryAt: now,
-          nextEligibleAt,
-        })
-        .run();
+      })
+      .run();
 
-      logger.debug(
-        { contestId, profileId, nextEligibleAt },
-        'Entry limit record created',
-      );
-    }
+    logger.info({ contestId, profileId, nextEligibleAt }, 'Entry recorded');
   }
 
   // ---------------------------------------------------------------------------

@@ -13,6 +13,7 @@ export type { ContextOptions, ProxyConfig } from './context-factory.js';
 
 // Stealth configuration
 export { getStealthArgs, getStealthScripts } from './stealth-config.js';
+export type { StealthArgsOptions } from './stealth-config.js';
 
 // Fingerprint generation
 export {

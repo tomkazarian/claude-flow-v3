@@ -15,7 +15,10 @@ import { FormAnalyzer } from '../form-analyzer.js';
 import { MultiStepHandler } from '../multi-step-handler.js';
 import { CheckboxHandler } from '../checkbox-handler.js';
 import { ConfirmationHandler } from '../confirmation-handler.js';
+import { detectCaptcha } from '../../captcha/captcha-detector.js';
+import { CaptchaSolver } from '../../captcha/captcha-solver.js';
 import type { EntryStrategy, EntryContext, EntryResult, Page } from '../types.js';
+import type { Page as PlaywrightPage } from 'playwright';
 
 const log = getLogger('entry', { component: 'multi-step-strategy' });
 
@@ -91,7 +94,13 @@ export class MultiStepStrategy implements EntryStrategy {
         } catch (captchaError) {
           const msg = captchaError instanceof Error ? captchaError.message : String(captchaError);
           errors.push(`CAPTCHA: ${msg}`);
-          log.error({ error: msg }, 'CAPTCHA solving failed on final step');
+          log.error({ error: msg }, 'CAPTCHA solving failed on final step, aborting submission');
+          throw new EntryError(
+            `CAPTCHA solving failed: ${msg}`,
+            'CAPTCHA_FAILED',
+            contest.id,
+            entryId,
+          );
         }
       }
 
@@ -146,10 +155,11 @@ export class MultiStepStrategy implements EntryStrategy {
 
       let screenshotPath: string | undefined;
       try {
-        await page.screenshot({ fullPage: false });
         screenshotPath = `./data/screenshots/error_${entryId}_${Date.now()}.png`;
+        await page.screenshot({ path: screenshotPath, fullPage: false });
       } catch {
-        // Ignore
+        // Screenshot failure should not mask the original error
+        screenshotPath = undefined;
       }
 
       eventBus.emit('entry:failed', { entryId, error: message });
@@ -171,10 +181,21 @@ export class MultiStepStrategy implements EntryStrategy {
   }
 
   /**
-   * Attempt to handle CAPTCHA on the page.
+   * Detect the CAPTCHA type on the page, solve it, and inject the solution.
+   * Throws if no solver is available or if solving fails.
    */
-  private async handleCaptcha(_page: Page): Promise<void> {
-    eventBus.emit('captcha:solving', { type: 'unknown', provider: 'pending' });
-    log.warn('CAPTCHA solving delegated to captcha module');
+  private async handleCaptcha(page: Page): Promise<void> {
+    const detection = await detectCaptcha(page as unknown as PlaywrightPage);
+
+    if (!detection) {
+      log.warn('CAPTCHA was expected but detector found none on the page');
+      return;
+    }
+
+    log.info({ captchaType: detection.type, siteKey: detection.siteKey }, 'CAPTCHA detected, solving');
+    eventBus.emit('captcha:solving', { type: detection.type, provider: 'pending' });
+
+    const solver = new CaptchaSolver();
+    await solver.solve(detection, page as unknown as PlaywrightPage);
   }
 }

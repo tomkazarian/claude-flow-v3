@@ -37,7 +37,7 @@ export class AppError extends Error {
       statusCode: this.statusCode,
       isOperational: this.isOperational,
       timestamp: this.timestamp,
-      stack: this.stack,
+      ...(process.env['NODE_ENV'] !== 'production' ? { stack: this.stack } : {}),
     };
   }
 }

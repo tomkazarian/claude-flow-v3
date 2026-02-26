@@ -24,6 +24,12 @@ interface Point {
 // ---------------------------------------------------------------------------
 
 export class Humanizer {
+  /** Last known cursor X position. Defaults to -1 (unknown). */
+  private lastMouseX = -1;
+
+  /** Last known cursor Y position. Defaults to -1 (unknown). */
+  private lastMouseY = -1;
+
   // -----------------------------------------------------------------------
   // Public methods
   // -----------------------------------------------------------------------
@@ -48,10 +54,17 @@ export class Humanizer {
     const targetX = box.x + box.width * (0.2 + Math.random() * 0.6);
     const targetY = box.y + box.height * (0.2 + Math.random() * 0.6);
 
-    // Get current mouse position (approximate from viewport centre)
-    const viewport = page.viewportSize();
-    const startX = viewport ? viewport.width / 2 + gaussianRandom(0, 50) : 400;
-    const startY = viewport ? viewport.height / 2 + gaussianRandom(0, 50) : 300;
+    // Use tracked cursor position; fall back to viewport centre only if unknown
+    let startX: number;
+    let startY: number;
+    if (this.lastMouseX >= 0 && this.lastMouseY >= 0) {
+      startX = this.lastMouseX;
+      startY = this.lastMouseY;
+    } else {
+      const viewport = page.viewportSize();
+      startX = viewport ? viewport.width / 2 + gaussianRandom(0, 50) : 400;
+      startY = viewport ? viewport.height / 2 + gaussianRandom(0, 50) : 300;
+    }
 
     await this.humanMoveMouse(page, targetX, targetY, { startX, startY });
 
@@ -61,6 +74,10 @@ export class Humanizer {
     await page.mouse.click(targetX, targetY, {
       delay: Math.floor(gaussianRandom(60, 20)),
     });
+
+    // Update tracked position to where we clicked
+    this.lastMouseX = targetX;
+    this.lastMouseY = targetY;
 
     logger.debug({ selector, x: Math.round(targetX), y: Math.round(targetY) }, 'Human click');
   }
@@ -132,6 +149,8 @@ export class Humanizer {
   /**
    * Move the mouse from a start point (or the current approximated position)
    * to the target coordinates along a Bezier curve with multiple control points.
+   * Uses a Fitts's Law-inspired velocity profile: slow at the start (acceleration),
+   * fast in the middle (ballistic phase), and slow at the end (correction phase).
    */
   async humanMoveMouse(
     page: Page,
@@ -140,8 +159,8 @@ export class Humanizer {
     options?: { startX?: number; startY?: number },
   ): Promise<void> {
     const viewport = page.viewportSize();
-    const startX = options?.startX ?? (viewport ? viewport.width / 2 : 400);
-    const startY = options?.startY ?? (viewport ? viewport.height / 2 : 300);
+    const startX = options?.startX ?? (this.lastMouseX >= 0 ? this.lastMouseX : (viewport ? viewport.width / 2 : 400));
+    const startY = options?.startY ?? (this.lastMouseY >= 0 ? this.lastMouseY : (viewport ? viewport.height / 2 : 300));
 
     const start: Point = { x: startX, y: startY };
     const end: Point = { x, y };
@@ -149,12 +168,27 @@ export class Humanizer {
 
     const path = bezierCurve(start, end, steps);
 
-    for (const point of path) {
-      const jittered = addNaturalJitter(point, 1.5);
+    // Base delay range for the movement
+    const minDelay = 2;
+    const maxDelay = 18;
+
+    for (let i = 0; i < path.length; i++) {
+      const jittered = addNaturalJitter(path[i]!, 1.5);
       await page.mouse.move(jittered.x, jittered.y);
-      // Variable speed: faster in the middle, slower at start/end
-      await humanWait(2, 12);
+
+      // Fitts's Law bell-curve speed: sin(progress * PI) gives 0 at
+      // start/end (slow) and 1 at midpoint (fast). We invert it for
+      // delay so that high speed = low delay.
+      const progress = path.length > 1 ? i / (path.length - 1) : 0.5;
+      const speedFactor = Math.sin(progress * Math.PI); // 0..1..0
+      // High speedFactor => low delay (fast), low speedFactor => high delay (slow)
+      const delay = maxDelay - speedFactor * (maxDelay - minDelay);
+      await humanWait(Math.floor(delay), Math.floor(delay + 4));
     }
+
+    // Track the final cursor position
+    this.lastMouseX = x;
+    this.lastMouseY = y;
   }
 
   /**

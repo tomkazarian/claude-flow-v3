@@ -1,5 +1,6 @@
 import Fastify, { type FastifyInstance } from 'fastify';
 import fastifyCors from '@fastify/cors';
+import rateLimit from '@fastify/rate-limit';
 import fastifyStatic from '@fastify/static';
 import { resolve, join } from 'node:path';
 import { existsSync } from 'node:fs';
@@ -33,11 +34,19 @@ export async function createServer(): Promise<FastifyInstance> {
   // ---------------------------------------------------------------------------
   await app.register(fastifyCors, {
     origin: isProduction
-      ? (process.env['CORS_ORIGIN'] ?? true)
+      ? (process.env['CORS_ORIGIN'] ?? false)
       : true,
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
+  });
+
+  // ---------------------------------------------------------------------------
+  // Rate limiting
+  // ---------------------------------------------------------------------------
+  await app.register(rateLimit, {
+    max: 100,
+    timeWindow: '1 minute',
   });
 
   // ---------------------------------------------------------------------------
@@ -112,27 +121,81 @@ export async function createServer(): Promise<FastifyInstance> {
   // ---------------------------------------------------------------------------
   // Graceful shutdown
   // ---------------------------------------------------------------------------
-  const shutdown = async (signal: string) => {
-    logger.info({ signal }, 'Received shutdown signal, starting graceful shutdown');
+  const FORCE_KILL_TIMEOUT_MS = 30_000;
+  let isShuttingDown = false;
 
+  const gracefulShutdown = async (reason: string) => {
+    if (isShuttingDown) {
+      logger.warn({ reason }, 'Shutdown already in progress, ignoring duplicate signal');
+      return;
+    }
+    isShuttingDown = true;
+
+    logger.info({ reason }, 'Initiating graceful shutdown');
+
+    // Force-kill safety net: if shutdown takes too long, exit hard
+    const forceKillTimer = setTimeout(() => {
+      logger.fatal('Graceful shutdown timed out after 30s, forcing exit');
+      process.exit(1);
+    }, FORCE_KILL_TIMEOUT_MS);
+    forceKillTimer.unref();
+
+    // 1. Stop accepting new HTTP requests
     try {
-      // Close the HTTP server (stop accepting new connections)
       await app.close();
       logger.info('Fastify server closed');
     } catch (error) {
       logger.error({ err: error }, 'Error during Fastify server close');
     }
 
+    // 2. Close all queue workers, queue events, and queues via QueueManager
     try {
-      // Close Redis
+      const qm = (app as unknown as Record<string, unknown>)['queueManager'];
+      if (qm && typeof (qm as { shutdown: () => Promise<void> }).shutdown === 'function') {
+        await (qm as { shutdown: () => Promise<void> }).shutdown();
+        logger.info('Queue workers and queues closed');
+      }
+    } catch (error) {
+      logger.error({ err: error }, 'Error closing queue workers');
+    }
+
+    // 3. Stop all schedulers
+    try {
+      const schedulers = (app as unknown as Record<string, unknown>)['schedulers'];
+      if (Array.isArray(schedulers)) {
+        for (const sched of schedulers) {
+          if (sched && typeof (sched as { stop: () => void }).stop === 'function') {
+            (sched as { stop: () => void }).stop();
+          }
+        }
+        logger.info('Schedulers stopped');
+      }
+    } catch (error) {
+      logger.error({ err: error }, 'Error stopping schedulers');
+    }
+
+    // 4. Drain the browser pool (close all contexts and browsers)
+    try {
+      const pool = (app as unknown as Record<string, unknown>)['browserPool'];
+      if (pool && typeof (pool as { destroy: () => Promise<void> }).destroy === 'function') {
+        await (pool as { destroy: () => Promise<void> }).destroy();
+        logger.info('Browser pool drained');
+      }
+    } catch (error) {
+      logger.error({ err: error }, 'Error draining browser pool');
+    }
+
+    // 5. Close Redis connection
+    try {
       const { closeRedis } = await import('./queue/redis.js');
       await closeRedis();
+      logger.info('Redis connection closed');
     } catch (error) {
       logger.error({ err: error }, 'Error closing Redis');
     }
 
+    // 6. Close database connection
     try {
-      // Close database
       const { closeDb } = await import('./db/index.js');
       closeDb();
       logger.info('Database connection closed');
@@ -140,12 +203,16 @@ export async function createServer(): Promise<FastifyInstance> {
       logger.error({ err: error }, 'Error closing database');
     }
 
+    clearTimeout(forceKillTimer);
     logger.info('Graceful shutdown complete');
     process.exit(0);
   };
 
-  process.on('SIGINT', () => void shutdown('SIGINT'));
-  process.on('SIGTERM', () => void shutdown('SIGTERM'));
+  // Expose the shutdown function so index.ts can call it from global error handlers
+  (app as unknown as Record<string, unknown>)['gracefulShutdown'] = gracefulShutdown;
+
+  process.on('SIGINT', () => void gracefulShutdown('SIGINT'));
+  process.on('SIGTERM', () => void gracefulShutdown('SIGTERM'));
 
   return app;
 }

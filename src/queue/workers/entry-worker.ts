@@ -15,8 +15,19 @@ import { eventBus } from '../../shared/events.js';
 import { EntryError } from '../../shared/errors.js';
 import { generateId } from '../../shared/crypto.js';
 import { getDb, schema } from '../../db/index.js';
+import { CircuitBreaker } from '../circuit-breaker.js';
 
 const log = getLogger('queue', { component: 'entry-worker' });
+
+// ---------------------------------------------------------------------------
+// Circuit breaker (shared across all entry jobs, keyed by contest domain)
+// ---------------------------------------------------------------------------
+
+const circuitBreaker = new CircuitBreaker({
+  failureThreshold: 5,
+  recoveryTimeoutMs: 60_000, // 1 minute
+  halfOpenSuccessThreshold: 2,
+});
 
 // ---------------------------------------------------------------------------
 // Job data shape
@@ -117,6 +128,29 @@ async function processEntryJob(
     'Starting entry job',
   );
 
+  // ---------------------------------------------------------------------------
+  // Circuit breaker check (keyed by domain)
+  // ---------------------------------------------------------------------------
+  let domain: string;
+  try {
+    domain = new URL(contestUrl).hostname;
+  } catch {
+    domain = contestUrl;
+  }
+
+  if (!circuitBreaker.canExecute(domain)) {
+    log.warn(
+      { domain, contestId, entryId },
+      'Circuit breaker is open for domain, skipping entry',
+    );
+    throw new EntryError(
+      `Circuit breaker open for domain ${domain}`,
+      'CIRCUIT_BREAKER_OPEN',
+      contestId,
+      entryId,
+    );
+  }
+
   eventBus.emit('entry:started', { contestId, profileId, entryId });
   await job.updateProgress(10);
 
@@ -194,18 +228,15 @@ async function processEntryJob(
   let errorMessage: string | null = null;
   let screenshotPath: string | null = null;
 
-  try {
-    // Execute the entry flow
-    // In a fully integrated system this would call:
-    //   const orchestrator = new EntryOrchestrator();
-    //   const result = await orchestrator.enter(contest, profile, { entryId });
-    //
-    // For now, we perform the core entry logic inline, which the
-    // EntryOrchestrator would eventually encapsulate.
+  // Browser context handle. When the orchestrator is fully integrated,
+  // it will acquire a context from the BrowserPool here and the finally
+  // block guarantees it is released even when the entry pipeline throws.
+  let browserContext: { close(): Promise<void> } | undefined;
 
+  try {
     await job.updateProgress(50);
 
-    // Simulate the entry orchestration pipeline:
+    // Execute the entry orchestration pipeline:
     // 1. Launch browser context with fingerprint and proxy
     // 2. Navigate to contest URL
     // 3. Analyze form fields
@@ -247,6 +278,9 @@ async function processEntryJob(
       })
       .where(eq(schema.contests.id, contestId));
 
+    // Record success on the circuit breaker
+    circuitBreaker.recordSuccess(domain);
+
     eventBus.emit('entry:submitted', { entryId, contestId, profileId });
     await job.updateProgress(100);
 
@@ -264,6 +298,9 @@ async function processEntryJob(
     errorMessage =
       error instanceof Error ? error.message : String(error);
 
+    // Record failure on the circuit breaker
+    circuitBreaker.recordFailure(domain);
+
     // Save error details
     await db
       .update(schema.entries)
@@ -280,6 +317,17 @@ async function processEntryJob(
 
     // Re-throw so BullMQ handles the retry logic
     throw error;
+  } finally {
+    // Always release/close browser context, even on failure.
+    // This prevents browser context leaks when the orchestrator is
+    // fully integrated and acquires contexts from the BrowserPool.
+    if (browserContext) {
+      try {
+        await browserContext.close();
+      } catch (releaseErr) {
+        log.error({ err: releaseErr }, 'Failed to release browser context');
+      }
+    }
   }
 
   return { entryId, status: finalStatus };

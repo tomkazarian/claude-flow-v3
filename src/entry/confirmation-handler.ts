@@ -148,12 +148,12 @@ export class ConfirmationHandler {
       }
     }
 
-    // If we cannot determine success or failure, assume success
-    // if the page loaded without errors
-    log.info({ entryId }, 'Could not determine result, assuming success');
+    // If we cannot determine success or failure, do NOT assume success.
+    // Silent false-positives are worse than false-negatives.
+    log.warn({ entryId }, 'Could not determine confirmation result — neither success nor failure indicators found');
     return {
-      success: true,
-      message: 'Entry submitted (confirmation status uncertain)',
+      success: false,
+      message: 'Entry submitted but confirmation could not be determined',
       screenshotPath,
     };
   }
