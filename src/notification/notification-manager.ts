@@ -1,6 +1,10 @@
 /**
  * Central notification router. Routes notifications to configured channels
  * based on priority and user preferences stored in app_settings.
+ *
+ * The in-app channel is always registered automatically so notifications
+ * are persisted to the local database even when no external services
+ * (webhooks, SMTP) are configured.
  */
 
 import { eq } from 'drizzle-orm';
@@ -8,6 +12,7 @@ import { getDb } from '../db/index.js';
 import { appSettings } from '../db/schema.js';
 import { getLogger } from '../shared/logger.js';
 import { eventBus } from '../shared/events.js';
+import { InAppChannel } from './channels/in-app.js';
 import type {
   AppNotification,
   DigestData,
@@ -38,6 +43,7 @@ export class NotificationManager {
   /**
    * Loads notification preferences from app_settings table.
    * Falls back to defaults if no preferences are stored.
+   * Always registers the in-app channel so notifications persist locally.
    */
   initialize(): void {
     try {
@@ -60,10 +66,26 @@ export class NotificationManager {
         log.info('Using default notification preferences');
       }
 
+      // Always register the in-app channel so notifications persist locally
+      // regardless of external service configuration.
+      if (!this.channels.has('in-app')) {
+        this.registerChannel('in-app', new InAppChannel());
+      }
+
       this.initialized = true;
     } catch (error) {
       log.error({ err: error }, 'Failed to load notification preferences, using defaults');
       this.preferences = { ...DEFAULT_NOTIFICATION_PREFERENCES };
+
+      // Still attempt to register in-app channel on error path
+      if (!this.channels.has('in-app')) {
+        try {
+          this.registerChannel('in-app', new InAppChannel());
+        } catch {
+          log.warn('Failed to register in-app channel during error recovery');
+        }
+      }
+
       this.initialized = true;
     }
   }
@@ -231,6 +253,18 @@ export class NotificationManager {
     };
 
     await this.notify(notification);
+  }
+
+  /**
+   * Returns the in-app channel instance for querying stored notifications.
+   * Returns undefined if the in-app channel has not been registered.
+   */
+  getInAppChannel(): InAppChannel | undefined {
+    const channel = this.channels.get('in-app');
+    if (channel instanceof InAppChannel) {
+      return channel;
+    }
+    return undefined;
   }
 
   /**

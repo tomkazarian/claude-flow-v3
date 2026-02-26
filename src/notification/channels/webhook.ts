@@ -24,7 +24,8 @@ interface SlackBlock {
   }>;
   elements?: Array<{
     type: string;
-    text?: {
+    /** For context blocks, text is a plain string; for actions, it is an object. */
+    text?: string | {
       type: string;
       text: string;
     };
@@ -166,10 +167,7 @@ function formatSlackPayload(notification: AppNotification): SlackPayload {
     elements: [
       {
         type: 'mrkdwn',
-        text: {
-          type: 'mrkdwn',
-          text: `Sweepstakes Platform | ${notification.timestamp ?? new Date().toISOString()}`,
-        },
+        text: `Sweepstakes Platform | ${notification.timestamp ?? new Date().toISOString()}`,
       },
     ],
   });

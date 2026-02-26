@@ -2,7 +2,7 @@ import type { FastifyInstance, FastifyReply } from 'fastify';
 import { eq, desc, sql, count as countFn } from 'drizzle-orm';
 import { getDb } from '../../db/index.js';
 import { schema } from '../../db/index.js';
-import { generateId } from '../../shared/crypto.js';
+import { encrypt, generateId } from '../../shared/crypto.js';
 import { AppError } from '../../shared/errors.js';
 import { getLogger } from '../../shared/logger.js';
 import { validateBody, validateParams } from '../middleware/validator.js';
@@ -73,10 +73,9 @@ export async function profileRoutes(app: FastifyInstance): Promise<void> {
       const id = generateId();
       const now = new Date().toISOString();
 
-      // Store data without route-level encryption. PII encryption for
-      // addressLine1/addressLine2 is handled by ProfileManager. Direct
-      // DB inserts from routes store plaintext for email/phone fields,
-      // matching ProfileManager's behavior.
+      // Encrypt PII address fields at rest, matching ProfileManager behavior.
+      // addressLine1/addressLine2 contain physical addresses and must be
+      // encrypted with AES-256-GCM before storage.
       await db.insert(schema.profiles).values({
         id,
         firstName: body.firstName,
@@ -85,8 +84,8 @@ export async function profileRoutes(app: FastifyInstance): Promise<void> {
         emailAliases: JSON.stringify(body.emailAliases ?? []),
         phone: body.phone ?? null,
         phoneProvider: body.phoneProvider ?? null,
-        addressLine1: body.addressLine1 ?? null,
-        addressLine2: body.addressLine2 ?? null,
+        addressLine1: body.addressLine1 ? encrypt(body.addressLine1) : null,
+        addressLine2: body.addressLine2 ? encrypt(body.addressLine2) : null,
         city: body.city ?? null,
         state: body.state ?? null,
         zip: body.zip ?? null,
@@ -132,7 +131,8 @@ export async function profileRoutes(app: FastifyInstance): Promise<void> {
 
       const now = new Date().toISOString();
 
-      // Only update fields that were explicitly provided
+      // Only update fields that were explicitly provided.
+      // Encrypt PII address fields to match ProfileManager behavior.
       const updateValues: Record<string, unknown> = { updatedAt: now };
       if (body.firstName !== undefined) updateValues['firstName'] = body.firstName;
       if (body.lastName !== undefined) updateValues['lastName'] = body.lastName;
@@ -140,8 +140,8 @@ export async function profileRoutes(app: FastifyInstance): Promise<void> {
       if (body.emailAliases !== undefined) updateValues['emailAliases'] = JSON.stringify(body.emailAliases);
       if (body.phone !== undefined) updateValues['phone'] = body.phone;
       if (body.phoneProvider !== undefined) updateValues['phoneProvider'] = body.phoneProvider;
-      if (body.addressLine1 !== undefined) updateValues['addressLine1'] = body.addressLine1;
-      if (body.addressLine2 !== undefined) updateValues['addressLine2'] = body.addressLine2;
+      if (body.addressLine1 !== undefined) updateValues['addressLine1'] = body.addressLine1 ? encrypt(body.addressLine1) : null;
+      if (body.addressLine2 !== undefined) updateValues['addressLine2'] = body.addressLine2 ? encrypt(body.addressLine2) : null;
       if (body.city !== undefined) updateValues['city'] = body.city;
       if (body.state !== undefined) updateValues['state'] = body.state;
       if (body.zip !== undefined) updateValues['zip'] = body.zip;
@@ -191,16 +191,15 @@ export async function profileRoutes(app: FastifyInstance): Promise<void> {
         updatedAt: new Date().toISOString(),
       };
 
-      // Pass values through without route-level encryption. ProfileManager
-      // is the single source of truth for PII encryption.
+      // Encrypt PII address fields to match ProfileManager behavior.
       if (body.firstName !== undefined) updateValues['firstName'] = body.firstName;
       if (body.lastName !== undefined) updateValues['lastName'] = body.lastName;
       if (body.email !== undefined) updateValues['email'] = body.email;
       if (body.emailAliases !== undefined) updateValues['emailAliases'] = JSON.stringify(body.emailAliases);
       if (body.phone !== undefined) updateValues['phone'] = body.phone;
       if (body.phoneProvider !== undefined) updateValues['phoneProvider'] = body.phoneProvider;
-      if (body.addressLine1 !== undefined) updateValues['addressLine1'] = body.addressLine1;
-      if (body.addressLine2 !== undefined) updateValues['addressLine2'] = body.addressLine2;
+      if (body.addressLine1 !== undefined) updateValues['addressLine1'] = body.addressLine1 ? encrypt(body.addressLine1) : null;
+      if (body.addressLine2 !== undefined) updateValues['addressLine2'] = body.addressLine2 ? encrypt(body.addressLine2) : null;
       if (body.city !== undefined) updateValues['city'] = body.city;
       if (body.state !== undefined) updateValues['state'] = body.state;
       if (body.zip !== undefined) updateValues['zip'] = body.zip;

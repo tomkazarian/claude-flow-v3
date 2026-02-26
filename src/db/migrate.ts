@@ -255,6 +255,19 @@ const DDL_STATEMENTS: string[] = [
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
   )`,
 
+  // ── notifications (in-app) ────────────────────────────────────────────
+  `CREATE TABLE IF NOT EXISTS notifications (
+    id         TEXT PRIMARY KEY,
+    type       TEXT NOT NULL CHECK(type IN ('win','error','info','digest')),
+    title      TEXT NOT NULL,
+    message    TEXT NOT NULL,
+    priority   TEXT NOT NULL DEFAULT 'normal' CHECK(priority IN ('low','normal','high','urgent')),
+    data       TEXT DEFAULT '{}',
+    is_read    INTEGER NOT NULL DEFAULT 0,
+    read_at    TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+  )`,
+
   // ── audit_log ─────────────────────────────────────────────────────────
   `CREATE TABLE IF NOT EXISTS audit_log (
     id          TEXT PRIMARY KEY,
@@ -298,6 +311,12 @@ const INDEX_STATEMENTS: string[] = [
 
   // cost_log
   `CREATE INDEX IF NOT EXISTS idx_cost_log_category ON cost_log(category)`,
+
+  // notifications
+  `CREATE INDEX IF NOT EXISTS idx_notifications_type ON notifications(type)`,
+  `CREATE INDEX IF NOT EXISTS idx_notifications_priority ON notifications(priority)`,
+  `CREATE INDEX IF NOT EXISTS idx_notifications_is_read ON notifications(is_read)`,
+  `CREATE INDEX IF NOT EXISTS idx_notifications_created_at ON notifications(created_at)`,
 
   // audit_log
   `CREATE INDEX IF NOT EXISTS idx_audit_log_action ON audit_log(action)`,

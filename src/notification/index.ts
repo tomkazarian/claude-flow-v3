@@ -5,7 +5,12 @@
 export { NotificationManager } from './notification-manager.js';
 export { WinNotifier } from './win-notifier.js';
 export { DigestBuilder } from './digest-builder.js';
-export { WebhookChannel, EmailAlertChannel } from './channels/index.js';
+export {
+  WebhookChannel,
+  EmailAlertChannel,
+  InAppChannel,
+  type StoredNotification,
+} from './channels/index.js';
 export type {
   AppNotification,
   NotificationChannel,

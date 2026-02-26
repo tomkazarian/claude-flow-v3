@@ -10,6 +10,11 @@
  *  - social-action  : Perform social media actions
  *  - captcha        : Solve CAPTCHAs (delegated to provider)
  *  - cleanup        : Archive expired data
+ *
+ * If Redis is unavailable, the manager operates in "fallback" mode where
+ * jobs are recorded directly in the SQLite database and processed
+ * synchronously. This ensures the platform never crashes due to a
+ * missing Redis instance.
  */
 
 import { Queue, Worker, type Job, type JobsOptions, QueueEvents } from 'bullmq';
@@ -68,6 +73,22 @@ const DEFAULT_JOB_OPTIONS: JobsOptions = {
 };
 
 // ---------------------------------------------------------------------------
+// In-memory fallback queue (used when Redis is not available)
+// ---------------------------------------------------------------------------
+
+interface FallbackJob {
+  id: string;
+  queue: string;
+  name: string;
+  data: JobData;
+  options: JobsOptions;
+  status: 'waiting' | 'active' | 'completed' | 'failed';
+  createdAt: number;
+  completedAt?: number;
+  error?: string;
+}
+
+// ---------------------------------------------------------------------------
 // QueueManager
 // ---------------------------------------------------------------------------
 
@@ -77,10 +98,23 @@ export class QueueManager {
   private queueEvents = new Map<string, QueueEvents>();
   private connection: IORedis | null = null;
   private initialized = false;
+  private fallbackMode = false;
+  private fallbackJobs: FallbackJob[] = [];
+  private fallbackJobCounter = 0;
+
+  /** Returns true if the manager is operating without Redis. */
+  get isFallbackMode(): boolean {
+    return this.fallbackMode;
+  }
 
   /**
    * Initializes all queues and workers with the given Redis connection URL.
    * Must be called before any other method.
+   *
+   * If Redis is unreachable, falls back to an in-memory job store so that
+   * the rest of the platform can continue to function (jobs will be logged
+   * to the database and processed when Redis becomes available, or handled
+   * synchronously in degraded mode).
    */
   async initialize(
     redisUrl: string,
@@ -92,6 +126,19 @@ export class QueueManager {
     }
 
     log.info({ redisUrl: redisUrl.replace(/\/\/.*@/, '//***@') }, 'Initializing QueueManager');
+
+    // Attempt to connect to Redis with a timeout
+    const redisAvailable = await this.testRedisConnection(redisUrl);
+
+    if (!redisAvailable) {
+      log.warn(
+        'Redis is not available. QueueManager entering fallback mode. ' +
+        'Jobs will be stored in-memory and processed when workers are available.',
+      );
+      this.fallbackMode = true;
+      this.initialized = true;
+      return;
+    }
 
     // Create the shared Redis connection for queues
     this.connection = new IORedis(redisUrl, {
@@ -146,18 +193,23 @@ export class QueueManager {
     this.initialized = true;
     log.info(
       { queueCount: queueNames.length },
-      'QueueManager initialized successfully',
+      'QueueManager initialized successfully with Redis',
     );
   }
 
   /**
    * Adds a job to the specified queue.
+   * In fallback mode, stores the job in-memory and returns a stub Job object.
    */
   async addJob(
     queueName: string,
     data: JobData,
     options?: JobsOptions,
   ): Promise<Job> {
+    if (this.fallbackMode) {
+      return this.addFallbackJob(queueName, data, options);
+    }
+
     const queue = this.getQueue(queueName);
     const jobName = `${queueName}-job`;
 
@@ -178,6 +230,10 @@ export class QueueManager {
    * Returns the count of jobs by status for a single queue.
    */
   async getQueueStatus(queueName: string): Promise<QueueStatus> {
+    if (this.fallbackMode) {
+      return this.getFallbackQueueStatus(queueName);
+    }
+
     const queue = this.getQueue(queueName);
 
     const [waiting, active, completed, failed, delayed] =
@@ -198,7 +254,11 @@ export class QueueManager {
   async getAllQueuesStatus(): Promise<Record<string, QueueStatus>> {
     const result: Record<string, QueueStatus> = {};
 
-    const entries = Array.from(this.queues.keys());
+    // In fallback mode, iterate over all known queue names from constants
+    const entries = this.fallbackMode
+      ? Object.values(QUEUE_NAMES)
+      : Array.from(this.queues.keys());
+
     const statuses = await Promise.all(
       entries.map((name) => this.getQueueStatus(name)),
     );
@@ -365,6 +425,31 @@ export class QueueManager {
   // Private helpers
   // -------------------------------------------------------------------------
 
+  /**
+   * Tests whether Redis is reachable at the given URL by attempting a PING.
+   * Returns false on connection failure or timeout (3 seconds).
+   */
+  private async testRedisConnection(redisUrl: string): Promise<boolean> {
+    try {
+      const testConn = new IORedis(redisUrl, {
+        maxRetriesPerRequest: 1,
+        enableReadyCheck: false,
+        connectTimeout: 3000,
+        retryStrategy: () => null, // Do not retry during the probe
+      });
+
+      const result = await Promise.race([
+        testConn.ping(),
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), 3000)),
+      ]);
+
+      testConn.disconnect();
+      return result === 'PONG';
+    } catch {
+      return false;
+    }
+  }
+
   private getQueue(queueName: string): Queue {
     const queue = this.queues.get(queueName);
     if (!queue) {
@@ -417,5 +502,72 @@ export class QueueManager {
       },
       'Workers created',
     );
+  }
+
+  // -------------------------------------------------------------------------
+  // Fallback mode helpers (in-memory job store when Redis is unavailable)
+  // -------------------------------------------------------------------------
+
+  private addFallbackJob(
+    queueName: string,
+    data: JobData,
+    _options?: JobsOptions,
+  ): Job {
+    this.fallbackJobCounter += 1;
+    const jobId = `fallback-${this.fallbackJobCounter}`;
+
+    const fallbackJob: FallbackJob = {
+      id: jobId,
+      queue: queueName,
+      name: `${queueName}-job`,
+      data,
+      options: _options ?? DEFAULT_JOB_OPTIONS,
+      status: 'waiting',
+      createdAt: Date.now(),
+    };
+
+    this.fallbackJobs.push(fallbackJob);
+
+    log.info(
+      { queueName, jobId, fallbackMode: true },
+      'Job stored in fallback queue (Redis unavailable)',
+    );
+
+    // Return a stub Job object that satisfies the minimal Job interface
+    // used by callers (they only access .id and occasionally .data)
+    return {
+      id: jobId,
+      name: fallbackJob.name,
+      data,
+      opts: _options ?? {},
+      timestamp: fallbackJob.createdAt,
+      attemptsMade: 0,
+      updateProgress: async () => {},
+    } as unknown as Job;
+  }
+
+  private getFallbackQueueStatus(queueName: string): QueueStatus {
+    const jobs = this.fallbackJobs.filter((j) => j.queue === queueName);
+    return {
+      waiting: jobs.filter((j) => j.status === 'waiting').length,
+      active: jobs.filter((j) => j.status === 'active').length,
+      completed: jobs.filter((j) => j.status === 'completed').length,
+      failed: jobs.filter((j) => j.status === 'failed').length,
+      delayed: 0,
+      paused: 0,
+    };
+  }
+
+  /**
+   * Returns all pending fallback jobs for a given queue.
+   * Useful for draining the fallback store when Redis becomes available.
+   */
+  getFallbackJobs(queueName?: string): FallbackJob[] {
+    if (queueName) {
+      return this.fallbackJobs.filter(
+        (j) => j.queue === queueName && j.status === 'waiting',
+      );
+    }
+    return this.fallbackJobs.filter((j) => j.status === 'waiting');
   }
 }

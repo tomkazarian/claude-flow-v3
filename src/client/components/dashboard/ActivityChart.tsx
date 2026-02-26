@@ -19,15 +19,7 @@ export function ActivityChart() {
 
   const { data, isLoading } = useEntryTimeSeries(dateRange);
 
-  const chartData = data ?? [
-    { date: 'Mon', successful: 42, failed: 3 },
-    { date: 'Tue', successful: 55, failed: 5 },
-    { date: 'Wed', successful: 38, failed: 2 },
-    { date: 'Thu', successful: 67, failed: 4 },
-    { date: 'Fri', successful: 48, failed: 6 },
-    { date: 'Sat', successful: 72, failed: 3 },
-    { date: 'Sun', successful: 61, failed: 2 },
-  ];
+  const chartData = data ?? [];
 
   return (
     <div className="card p-5">
@@ -37,6 +29,10 @@ export function ActivityChart() {
       {isLoading ? (
         <div className="flex h-64 items-center justify-center">
           <LoadingSpinner size="sm" />
+        </div>
+      ) : chartData.length === 0 ? (
+        <div className="flex h-64 items-center justify-center text-sm text-zinc-500">
+          No entry activity data yet
         </div>
       ) : (
         <div className="mt-4 h-64">

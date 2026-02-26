@@ -161,6 +161,8 @@ export class PriorityEngine {
 
   /**
    * Retrieves and ranks the top N contests from the database.
+   * Uses historical performance data to refine scoring when fetching
+   * from the database (unlike rankContests which uses static weights).
    * Only includes contests that are eligible for entry.
    */
   async getNextBatch(count: number): Promise<RankedContest[]> {
@@ -168,7 +170,7 @@ export class PriorityEngine {
     const now = new Date().toISOString();
 
     // Fetch eligible contests
-    const contests = await db
+    const contests = db
       .select()
       .from(schema.contests)
       .where(
@@ -178,14 +180,98 @@ export class PriorityEngine {
         ),
       )
       .orderBy(desc(schema.contests.priorityScore))
-      .limit(count * 3); // Fetch extra for filtering
+      .limit(count * 3) // Fetch extra for filtering
+      .all();
 
     if (contests.length === 0) {
       log.info('No eligible contests found for ranking');
       return [];
     }
 
-    const ranked = this.rankContests(contests);
+    // Score each contest with historical data for more accurate ranking.
+    // We use scoreWithHistory which queries the DB for domain/type success
+    // rates, then combine with queue priority.
+    const scored = await Promise.all(
+      contests.map(async (contest) => {
+        const queuePriority = calculatePriority({
+          id: contest.id,
+          prizeValue: contest.prizeValue,
+          endDate: contest.endDate,
+          entryFrequency: contest.entryFrequency,
+          difficultyScore: contest.difficultyScore,
+          legitimacyScore: contest.legitimacyScore,
+          type: contest.type,
+        });
+
+        const contestScore = await this.scorer.scoreWithHistory({
+          id: contest.id,
+          url: contest.url,
+          title: contest.title,
+          type: contest.type,
+          prizeValue: contest.prizeValue,
+          entryMethod: contest.entryMethod,
+          legitimacyScore: contest.legitimacyScore,
+          requiresCaptcha: contest.requiresCaptcha ?? 0,
+          requiresEmailConfirm: contest.requiresEmailConfirm ?? 0,
+          requiresSmsVerify: contest.requiresSmsVerify ?? 0,
+          requiresSocialAction: contest.requiresSocialAction ?? 0,
+        });
+
+        const compositeScore = Math.round(
+          queuePriority * 0.6 + contestScore.priority * 0.4,
+        );
+
+        return {
+          id: contest.id,
+          url: contest.url,
+          title: contest.title,
+          type: contest.type,
+          prizeValue: contest.prizeValue,
+          entryMethod: contest.entryMethod,
+          endDate: contest.endDate,
+          entryFrequency: contest.entryFrequency,
+          difficultyScore: contest.difficultyScore,
+          legitimacyScore: contest.legitimacyScore,
+          status: contest.status,
+          score: compositeScore,
+          reason: contestScore.reason,
+          recommendation: contestScore.recommendation,
+        };
+      }),
+    );
+
+    // Sort by score descending, then by end date ascending (urgency tiebreaker)
+    scored.sort((a, b) => {
+      if (a.score !== b.score) {
+        return b.score - a.score;
+      }
+      if (a.endDate && b.endDate) {
+        return new Date(a.endDate).getTime() - new Date(b.endDate).getTime();
+      }
+      if (a.endDate && !b.endDate) return -1;
+      if (!a.endDate && b.endDate) return 1;
+      return 0;
+    });
+
+    // Assign ranks, filter out 'skip' recommendations
+    const ranked = scored
+      .filter((c) => c.recommendation !== 'skip')
+      .map((contest, index) => ({
+        id: contest.id,
+        url: contest.url,
+        title: contest.title,
+        type: contest.type,
+        prizeValue: contest.prizeValue,
+        entryMethod: contest.entryMethod,
+        endDate: contest.endDate,
+        entryFrequency: contest.entryFrequency,
+        difficultyScore: contest.difficultyScore,
+        legitimacyScore: contest.legitimacyScore,
+        status: contest.status,
+        rank: index + 1,
+        score: contest.score,
+        reason: contest.reason,
+      }));
 
     // Return the top N
     const batch = ranked.slice(0, count);
@@ -198,7 +284,7 @@ export class PriorityEngine {
         topScore: batch[0]?.score,
         bottomScore: batch[batch.length - 1]?.score,
       },
-      'Next batch of ranked contests retrieved',
+      'Next batch of ranked contests retrieved (with historical data)',
     );
 
     return batch;

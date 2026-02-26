@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from 'react';
 import { Save, TestTube2, Wallet } from 'lucide-react';
 import { toast } from '../../stores/notification.store';
+import { useTestCaptcha } from '../../api/hooks';
 import type { SettingsData } from '../../api/hooks';
 
 interface CaptchaSettingsProps {
@@ -17,7 +18,7 @@ export function CaptchaSettings({ settings, onSave, loading }: CaptchaSettingsPr
     maxRetries: settings?.maxRetries ?? 3,
   });
 
-  const [testing, setTesting] = useState(false);
+  const testCaptcha = useTestCaptcha();
 
   const update = (key: string, value: string | number) => {
     setFormData((prev) => ({ ...prev, [key]: value }));
@@ -28,17 +29,11 @@ export function CaptchaSettings({ settings, onSave, loading }: CaptchaSettingsPr
     onSave({ captcha: formData });
   };
 
-  const handleTest = async () => {
-    setTesting(true);
-    try {
-      // Simulate test
-      await new Promise((resolve) => setTimeout(resolve, 2000));
-      toast.success('CAPTCHA test passed', 'Provider is configured correctly.');
-    } catch {
-      toast.error('CAPTCHA test failed', 'Check your API key and provider settings.');
-    } finally {
-      setTesting(false);
-    }
+  const handleTest = () => {
+    testCaptcha.mutate(undefined, {
+      onSuccess: () => toast.success('CAPTCHA test passed', 'Provider is configured correctly.'),
+      onError: (err) => toast.error('CAPTCHA test failed', err.message || 'Check your API key and provider settings.'),
+    });
   };
 
   return (
@@ -117,11 +112,11 @@ export function CaptchaSettings({ settings, onSave, loading }: CaptchaSettingsPr
         <button
           type="button"
           onClick={handleTest}
-          disabled={testing || !formData.apiKey}
+          disabled={testCaptcha.isPending || !formData.apiKey}
           className="btn-secondary"
         >
           <TestTube2 className="h-4 w-4" />
-          {testing ? 'Testing...' : 'Test Connection'}
+          {testCaptcha.isPending ? 'Testing...' : 'Test Connection'}
         </button>
 
         <button type="submit" className="btn-primary" disabled={loading}>

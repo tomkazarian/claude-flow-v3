@@ -1,14 +1,17 @@
 import { Pause, Play } from 'lucide-react';
-import { useQueueStatus } from '../api/hooks';
+import { useQueueStatus, usePauseQueue, useResumeQueue } from '../api/hooks';
 import { useAppStore } from '../stores/app.store';
 import { QueueDashboard } from '../components/queue/QueueDashboard';
 import { JobList } from '../components/queue/JobList';
 import { LoadingSpinner } from '../components/shared/LoadingSpinner';
+import { toast } from '../stores/notification.store';
 
 export function QueuePage() {
   const { data, isLoading } = useQueueStatus();
   const queuePaused = useAppStore((s) => s.queuePaused);
-  const toggleQueuePaused = useAppStore((s) => s.toggleQueuePaused);
+  const setQueuePaused = useAppStore((s) => s.setQueuePaused);
+  const pauseQueue = usePauseQueue();
+  const resumeQueue = useResumeQueue();
 
   if (isLoading) {
     return (
@@ -33,7 +36,20 @@ export function QueuePage() {
           </p>
         </div>
         <button
-          onClick={toggleQueuePaused}
+          onClick={() => {
+            if (queuePaused) {
+              resumeQueue.mutate('all', {
+                onSuccess: () => { setQueuePaused(false); toast.success('Queues resumed'); },
+                onError: (err) => toast.error('Resume failed', err.message),
+              });
+            } else {
+              pauseQueue.mutate('all', {
+                onSuccess: () => { setQueuePaused(true); toast.success('Queues paused'); },
+                onError: (err) => toast.error('Pause failed', err.message),
+              });
+            }
+          }}
+          disabled={pauseQueue.isPending || resumeQueue.isPending}
           className={queuePaused ? 'btn-primary' : 'btn-secondary'}
         >
           {queuePaused ? (

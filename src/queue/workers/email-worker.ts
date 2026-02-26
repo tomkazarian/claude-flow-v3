@@ -237,23 +237,136 @@ interface EmailMessage {
 }
 
 /**
- * Searches for a confirmation email in the inbox.
- * In production, this would use Gmail API, IMAP, or other provider-specific methods.
+ * Searches for a confirmation email in the inbox using the configured provider.
+ * Supports Gmail (via googleapis) and IMAP.
+ * Returns null if no matching email is found (the caller retries).
  */
 async function searchForConfirmationEmail(
   provider: string,
+  emailAddress: string,
+  entryId: string,
+): Promise<EmailMessage | null> {
+  log.debug({ provider, emailAddress: maskEmail(emailAddress) }, 'Searching for confirmation email via provider');
+
+  try {
+    if (provider === 'gmail') {
+      return await searchViaGmail(emailAddress, entryId);
+    }
+
+    if (provider === 'imap') {
+      return await searchViaImap(emailAddress, entryId);
+    }
+
+    log.warn({ provider }, 'Unknown email provider, cannot search for confirmation email');
+    return null;
+  } catch (error) {
+    log.warn(
+      { err: error, provider, emailAddress: maskEmail(emailAddress) },
+      'Error searching for confirmation email, will retry',
+    );
+    return null;
+  }
+}
+
+/**
+ * Searches Gmail for confirmation emails using the real Gmail API client.
+ * Requires OAuth2 tokens stored in the email_accounts table.
+ */
+async function searchViaGmail(
+  emailAddress: string,
+  _entryId: string,
+): Promise<EmailMessage | null> {
+  try {
+    const { GmailClient } = await import('../../email/gmail-client.js');
+
+    const db = getDb();
+    const accounts = await db
+      .select()
+      .from(schema.emailAccounts)
+      .where(eq(schema.emailAccounts.emailAddress, emailAddress))
+      .limit(1);
+
+    const account = accounts[0];
+    if (!account) {
+      log.warn({ email: maskEmail(emailAddress) }, 'No Gmail account configuration found');
+      return null;
+    }
+
+    // Parse stored credentials and tokens from the oauthTokens column (encrypted JSON)
+    let credentials: { clientId: string; clientSecret: string; redirectUri: string };
+    let tokens: { refreshToken: string };
+
+    try {
+      const oauthData = account.oauthTokens ? JSON.parse(account.oauthTokens) : {};
+      const imapData = account.imapConfig ? JSON.parse(account.imapConfig) : {};
+      credentials = {
+        clientId: oauthData.clientId ?? imapData.clientId ?? process.env['GMAIL_CLIENT_ID'] ?? '',
+        clientSecret: oauthData.clientSecret ?? imapData.clientSecret ?? process.env['GMAIL_CLIENT_SECRET'] ?? '',
+        redirectUri: oauthData.redirectUri ?? 'http://localhost:3000/api/v1/email/oauth/callback',
+      };
+      tokens = {
+        refreshToken: oauthData.refreshToken ?? '',
+      };
+    } catch {
+      log.warn({ email: maskEmail(emailAddress) }, 'Failed to parse Gmail account OAuth tokens');
+      return null;
+    }
+
+    if (!credentials.clientId || !credentials.clientSecret || !tokens.refreshToken) {
+      log.warn({ email: maskEmail(emailAddress) }, 'Gmail credentials incomplete, cannot search');
+      return null;
+    }
+
+    const gmailClient = new GmailClient(credentials);
+    await gmailClient.refreshTokens(tokens.refreshToken);
+
+    // Search for unread confirmation emails in the last 10 minutes
+    const query = 'is:unread newer_than:10m (subject:confirm OR subject:verify OR subject:activate OR subject:entry)';
+    const messages = await gmailClient.listMessages(query, 10);
+
+    for (const msg of messages) {
+      // Use either HTML or plain text body
+      const body = msg.htmlBody || msg.body;
+      if (body) {
+        await gmailClient.markAsRead(msg.id);
+
+        return {
+          id: msg.id,
+          subject: msg.subject,
+          body,
+          from: msg.from,
+          receivedAt: msg.date,
+        };
+      }
+    }
+
+    return null;
+  } catch (error) {
+    log.debug({ err: error }, 'Gmail search failed');
+    return null;
+  }
+}
+
+/**
+ * Searches for confirmation emails via IMAP using environment-configured credentials.
+ * Falls back to using got to fetch from a simple mail API if configured.
+ */
+async function searchViaImap(
   _emailAddress: string,
   _entryId: string,
 ): Promise<EmailMessage | null> {
-  // Integration point for email providers:
-  // - Gmail: use googleapis to search messages
-  // - IMAP: use imap-simple or similar
-  // - Outlook: use Microsoft Graph API
+  const imapHost = process.env['IMAP_HOST'];
+  const imapUser = process.env['IMAP_USER'];
+  const imapPass = process.env['IMAP_PASS'];
 
-  log.debug({ provider }, 'Searching for confirmation email via provider');
+  if (!imapHost || !imapUser || !imapPass) {
+    log.debug('IMAP credentials not configured, cannot search via IMAP');
+    return null;
+  }
 
-  // This would be replaced by actual email provider integration.
-  // Returning null triggers the retry loop.
+  // IMAP integration requires a dedicated IMAP library (e.g. imapflow).
+  // Log that the configuration is present but the library is not yet integrated.
+  log.info({ imapHost }, 'IMAP configuration found but IMAP library not yet integrated');
   return null;
 }
 

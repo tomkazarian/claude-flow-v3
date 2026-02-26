@@ -132,13 +132,19 @@ export function SettingsPage() {
 /** SMS settings content */
 function SmsSettingsContent({
   settings: _settings,
-  onSave: _onSave,
-  loading: _loading,
+  onSave,
+  loading,
 }: {
   settings: SettingsData | undefined;
   onSave: (data: Partial<SettingsData>) => void;
   loading: boolean;
 }) {
+  const [smsData, setSmsData] = useState({
+    accountSid: '',
+    authToken: '',
+    phoneNumber: '',
+  });
+
   return (
     <div className="space-y-6">
       <div className="card p-6">
@@ -148,21 +154,45 @@ function SmsSettingsContent({
         <div className="mt-4 space-y-4">
           <div>
             <label className="mb-1 block text-xs font-medium text-zinc-400">Account SID</label>
-            <input type="password" className="input-field" placeholder="ACxxxxxxxxxxxxxxxxx" />
+            <input
+              type="password"
+              className="input-field"
+              placeholder="ACxxxxxxxxxxxxxxxxx"
+              value={smsData.accountSid}
+              onChange={(e) => setSmsData((d) => ({ ...d, accountSid: e.target.value }))}
+            />
           </div>
           <div>
             <label className="mb-1 block text-xs font-medium text-zinc-400">Auth Token</label>
-            <input type="password" className="input-field" placeholder="Enter auth token" />
+            <input
+              type="password"
+              className="input-field"
+              placeholder="Enter auth token"
+              value={smsData.authToken}
+              onChange={(e) => setSmsData((d) => ({ ...d, authToken: e.target.value }))}
+            />
           </div>
           <div>
             <label className="mb-1 block text-xs font-medium text-zinc-400">Phone Number</label>
-            <input type="text" className="input-field" placeholder="+15551234567" />
+            <input
+              type="text"
+              className="input-field"
+              placeholder="+15551234567"
+              value={smsData.phoneNumber}
+              onChange={(e) => setSmsData((d) => ({ ...d, phoneNumber: e.target.value }))}
+            />
           </div>
         </div>
       </div>
 
       <div className="flex justify-end">
-        <button className="btn-primary">Save SMS Settings</button>
+        <button
+          onClick={() => onSave({ general: { ...smsData } as unknown as SettingsData['general'] })}
+          className="btn-primary"
+          disabled={loading}
+        >
+          {loading ? 'Saving...' : 'Save SMS Settings'}
+        </button>
       </div>
     </div>
   );

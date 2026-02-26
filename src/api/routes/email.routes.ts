@@ -123,13 +123,35 @@ export async function emailRoutes(app: FastifyInstance): Promise<void> {
 
       const tokens = await gmailClient.handleCallback(query.code);
 
+      // Fetch the user's real email address from Google's userinfo endpoint
+      // using the access token we just received.
+      let emailAddress: string;
+      try {
+        const userinfoResponse = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
+          headers: { Authorization: `Bearer ${tokens.accessToken}` },
+        });
+        if (!userinfoResponse.ok) {
+          throw new Error(`Google userinfo API returned ${userinfoResponse.status}`);
+        }
+        const userinfo = (await userinfoResponse.json()) as { email?: string };
+        if (!userinfo.email) {
+          throw new Error('No email address returned from Google userinfo API');
+        }
+        emailAddress = userinfo.email;
+      } catch (userinfoError) {
+        const msg = userinfoError instanceof Error ? userinfoError.message : 'Unknown error';
+        throw new AppError(
+          `Failed to fetch email from Google: ${msg}`,
+          'OAUTH_USERINFO_FAILED',
+          500,
+        );
+      }
+
       // Store the tokens in the database
       const db = getDb();
       const id = generateId();
       const now = new Date().toISOString();
 
-      // Extract email address from tokens (would need a profile API call in production)
-      const emailAddress = 'connected@gmail.com'; // Placeholder - would be fetched from Google
       const encryptedTokens = encrypt(JSON.stringify(tokens));
 
       await db.insert(schema.emailAccounts).values({
@@ -143,7 +165,7 @@ export async function emailRoutes(app: FastifyInstance): Promise<void> {
         createdAt: now,
       });
 
-      logger.info({ accountId: id }, 'Email account connected via OAuth');
+      logger.info({ accountId: id, emailAddress }, 'Email account connected via OAuth');
 
       return reply.send({
         data: {

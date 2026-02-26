@@ -252,7 +252,7 @@ export const proxies = sqliteTable(
     username: text("username"),
     password: text("password"),
     protocol: text("protocol", {
-      enum: ["http", "https", "socks5"],
+      enum: ["http", "https", "socks4", "socks5"],
     })
       .default("http")
       .notNull(),
@@ -260,7 +260,7 @@ export const proxies = sqliteTable(
     state: text("state"),
     city: text("city"),
     type: text("type", {
-      enum: ["residential", "datacenter", "mobile"],
+      enum: ["residential", "datacenter", "mobile", "isp"],
     }),
     isActive: integer("is_active").default(1).notNull(),
     lastHealthCheck: text("last_health_check"),
@@ -418,6 +418,36 @@ export const appSettings = sqliteTable("app_settings", {
   value: text("value").notNull(), // JSON-encoded value
   updatedAt: text("updated_at").default(currentTimestamp).notNull(),
 });
+
+// ---------------------------------------------------------------------------
+// notifications (in-app notification store)
+// ---------------------------------------------------------------------------
+export const notifications = sqliteTable(
+  "notifications",
+  {
+    id: text("id").primaryKey(), // ULID
+    type: text("type", {
+      enum: ["win", "error", "info", "digest"],
+    }).notNull(),
+    title: text("title").notNull(),
+    message: text("message").notNull(),
+    priority: text("priority", {
+      enum: ["low", "normal", "high", "urgent"],
+    })
+      .default("normal")
+      .notNull(),
+    data: text("data").default("{}"), // JSON
+    isRead: integer("is_read").default(0).notNull(),
+    readAt: text("read_at"),
+    createdAt: text("created_at").default(currentTimestamp).notNull(),
+  },
+  (table) => [
+    index("idx_notifications_type").on(table.type),
+    index("idx_notifications_priority").on(table.priority),
+    index("idx_notifications_is_read").on(table.isRead),
+    index("idx_notifications_created_at").on(table.createdAt),
+  ],
+);
 
 // ---------------------------------------------------------------------------
 // audit_log

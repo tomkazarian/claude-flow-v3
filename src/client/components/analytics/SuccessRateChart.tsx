@@ -17,15 +17,7 @@ interface SuccessRateChartProps {
 export function SuccessRateChart({ dateRange }: SuccessRateChartProps) {
   const { data, isLoading } = useSuccessRateTimeSeries(dateRange);
 
-  const chartData = data ?? [
-    { date: '2026-02-20', rate: 0.82 },
-    { date: '2026-02-21', rate: 0.85 },
-    { date: '2026-02-22', rate: 0.79 },
-    { date: '2026-02-23', rate: 0.88 },
-    { date: '2026-02-24', rate: 0.91 },
-    { date: '2026-02-25', rate: 0.87 },
-    { date: '2026-02-26', rate: 0.90 },
-  ];
+  const chartData = data ?? [];
 
   return (
     <div className="card p-5">
@@ -35,6 +27,10 @@ export function SuccessRateChart({ dateRange }: SuccessRateChartProps) {
       {isLoading ? (
         <div className="flex h-64 items-center justify-center">
           <LoadingSpinner size="sm" />
+        </div>
+      ) : chartData.length === 0 ? (
+        <div className="flex h-64 items-center justify-center text-sm text-zinc-500">
+          No success rate data yet
         </div>
       ) : (
         <div className="mt-4 h-64">

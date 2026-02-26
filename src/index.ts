@@ -70,10 +70,57 @@ async function main(): Promise<void> {
     await qm.initialize(env.REDIS_URL);
     // Store globally so the server shutdown handler can access it
     (globalThis as Record<string, unknown>)['__queueManager'] = qm;
-    logger.info('QueueManager initialized with workers');
+
+    if (qm.isFallbackMode) {
+      logger.warn('QueueManager running in FALLBACK mode (no Redis). Jobs stored in-memory.');
+    } else {
+      logger.info('QueueManager initialized with Redis and workers');
+    }
   } catch (error) {
     logger.warn({ err: error }, 'QueueManager initialization failed; jobs will not be processed');
   }
+
+  // ---------------------------------------------------------------------------
+  // 4b. Start schedulers (discovery, recurring entries, health checks)
+  // ---------------------------------------------------------------------------
+  const schedulerInstances: Array<{ stop: () => void }> = [];
+  try {
+    const qm = (globalThis as Record<string, unknown>)['__queueManager'] as
+      | import('./queue/queue-manager.js').QueueManager
+      | undefined;
+
+    if (qm && !qm.isFallbackMode) {
+      const { DiscoveryScheduler } = await import('./queue/schedulers/discovery-scheduler.js');
+      const { RecurringEntryScheduler } = await import('./queue/schedulers/recurring-entry-scheduler.js');
+      const { HealthCheckScheduler } = await import('./queue/schedulers/health-check-scheduler.js');
+
+      const discoveryScheduler = new DiscoveryScheduler(qm);
+      discoveryScheduler.start();
+      schedulerInstances.push(discoveryScheduler);
+
+      const entryScheduler = new RecurringEntryScheduler(qm, {
+        maxEntriesPerHour: env.MAX_ENTRIES_PER_HOUR,
+      });
+      entryScheduler.start();
+      schedulerInstances.push(entryScheduler);
+
+      const healthScheduler = new HealthCheckScheduler(qm);
+      healthScheduler.start();
+      schedulerInstances.push(healthScheduler);
+
+      logger.info(
+        { schedulerCount: schedulerInstances.length },
+        'All schedulers started (discovery, recurring-entry, health-check)',
+      );
+    } else {
+      logger.warn('Schedulers not started: QueueManager not available or in fallback mode');
+    }
+  } catch (error) {
+    logger.warn({ err: error }, 'Failed to start one or more schedulers');
+  }
+
+  // Store schedulers globally so the server shutdown handler can stop them
+  (globalThis as Record<string, unknown>)['__schedulers'] = schedulerInstances;
 
   // ---------------------------------------------------------------------------
   // 5. Create and start the Fastify server
@@ -87,6 +134,9 @@ async function main(): Promise<void> {
     if (qm) {
       (app as unknown as Record<string, unknown>)['queueManager'] = qm;
     }
+
+    // Attach schedulers to the app for graceful shutdown
+    (app as unknown as Record<string, unknown>)['schedulers'] = schedulerInstances;
 
     // Initialize the status bridge to forward eventBus events to the status monitor
     const { initStatusBridge } = await import('./analytics/status-bridge.js');

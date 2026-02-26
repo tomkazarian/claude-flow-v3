@@ -40,3 +40,6 @@ export { RateLimiter } from './rate-limiter.js';
 
 // Circuit breaker
 export { CircuitBreaker, CircuitState } from './circuit-breaker.js';
+
+// Redis connection utilities
+export { getRedis, isRedisAvailable, getRedisAvailability, closeRedis } from './redis.js';

@@ -335,7 +335,7 @@ export function useRetryEntry() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (entryId: string) =>
-      apiClient.post<unknown>(`/entries/${entryId}/retry`),
+      apiClient.post<unknown>(`/entries/${entryId}/retry`, {}),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.entries.all });
     },
@@ -670,6 +670,141 @@ export function useTriggerDiscovery() {
   });
 }
 
+// ---------------------------------------------------------------------------
+// Proxy hooks
+// ---------------------------------------------------------------------------
+
+interface ProxyEntry {
+  id: string;
+  host: string;
+  port: number;
+  protocol: string;
+  healthStatus: string;
+  isActive: number;
+  username: string | null;
+  password: string | null;
+  type: string | null;
+  country: string | null;
+  successCount: number;
+  failureCount: number;
+  avgLatencyMs: number | null;
+  lastHealthCheck: string | null;
+  createdAt: string;
+}
+
+export function useProxies() {
+  return useQuery({
+    queryKey: ['proxies', 'list'] as const,
+    queryFn: async ({ signal }) => {
+      const resp = await apiClient.get<DataEnvelope<ProxyEntry[]>>('/proxy', undefined, signal);
+      return resp.data ?? [];
+    },
+    staleTime: 60_000,
+  });
+}
+
+export function useCreateProxy() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { host: string; port: number; protocol: string }) =>
+      apiClient.post<DataEnvelope<ProxyEntry>>('/proxy', input),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['proxies'] });
+    },
+  });
+}
+
+export function useDeleteProxy() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (proxyId: string) =>
+      apiClient.delete(`/proxy/${proxyId}`),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['proxies'] });
+    },
+  });
+}
+
+export function useProxyHealthCheck() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () =>
+      apiClient.post('/proxy/health-check'),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['proxies'] });
+    },
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Email account hooks
+// ---------------------------------------------------------------------------
+
+interface EmailAccount {
+  id: string;
+  profileId: string;
+  emailAddress: string;
+  provider: string;
+  isActive: number;
+  lastSyncAt: string | null;
+  createdAt: string;
+}
+
+export function useEmailAccounts() {
+  return useQuery({
+    queryKey: ['email', 'accounts'] as const,
+    queryFn: async ({ signal }) => {
+      const resp = await apiClient.get<DataEnvelope<EmailAccount[]>>('/email/accounts', undefined, signal);
+      return resp.data ?? [];
+    },
+    staleTime: 120_000,
+  });
+}
+
+export function useConnectEmailAccount() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (profileId?: string) =>
+      apiClient.post<DataEnvelope<{ authUrl: string; message: string }>>('/email/accounts/connect', profileId ? { profileId } : undefined),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['email'] });
+    },
+  });
+}
+
+export function useDisconnectEmailAccount() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (accountId: string) =>
+      apiClient.delete(`/email/accounts/${accountId}`),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['email'] });
+    },
+  });
+}
+
+export function useSyncEmail() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () =>
+      apiClient.post('/email/sync'),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['email'] });
+    },
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Captcha test hook
+// ---------------------------------------------------------------------------
+
+export function useTestCaptcha() {
+  return useMutation({
+    mutationFn: () =>
+      apiClient.post<DataEnvelope<{ status: string; message: string }>>('/settings/test-captcha'),
+  });
+}
+
 // Re-export types for convenience
 export type {
   DashboardStats,
@@ -682,4 +817,6 @@ export type {
   PaginatedResponse,
   EntryStats,
   QueueMetrics,
+  ProxyEntry,
+  EmailAccount,
 };

@@ -10,11 +10,13 @@ export type ProxyProvider =
   | "smartproxy"
   | "iproyal"
   | "webshare"
+  | "static-list"
+  | "direct"
   | "custom";
 
-export type ProxyProtocol = "http" | "https" | "socks5";
+export type ProxyProtocol = "http" | "https" | "socks4" | "socks5";
 
-export type ProxyType = "residential" | "datacenter" | "mobile";
+export type ProxyType = "residential" | "datacenter" | "mobile" | "isp";
 
 export type ProxyHealthStatus = "healthy" | "degraded" | "dead" | "unknown";
 
@@ -49,7 +51,7 @@ export interface Proxy {
 
 export interface ProxyConfig {
   /** Rotation strategy for selecting proxies */
-  rotationStrategy: "round-robin" | "random" | "least-used" | "geo-match";
+  rotationStrategy: "round-robin" | "random" | "least-used" | "geo-matched" | "weighted";
 
   /** Maximum consecutive failures before marking a proxy as dead */
   maxConsecutiveFailures: number;
@@ -83,12 +85,14 @@ export const proxyProviderSchema = z.enum([
   "smartproxy",
   "iproyal",
   "webshare",
+  "static-list",
+  "direct",
   "custom",
 ]);
 
-export const proxyProtocolSchema = z.enum(["http", "https", "socks5"]);
+export const proxyProtocolSchema = z.enum(["http", "https", "socks4", "socks5"]);
 
-export const proxyTypeSchema = z.enum(["residential", "datacenter", "mobile"]);
+export const proxyTypeSchema = z.enum(["residential", "datacenter", "mobile", "isp"]);
 
 export const proxyHealthStatusSchema = z.enum([
   "healthy",
@@ -102,7 +106,8 @@ export const proxyConfigSchema = z.object({
     "round-robin",
     "random",
     "least-used",
-    "geo-match",
+    "geo-matched",
+    "weighted",
   ]),
   maxConsecutiveFailures: z.number().int().min(1).max(100),
   healthCheckIntervalMs: z.number().int().min(10_000),

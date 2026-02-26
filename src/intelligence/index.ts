@@ -6,7 +6,7 @@
  */
 
 export { ContestScorer } from './contest-scorer.js';
-export type { ScorableContest, ContestScore } from './contest-scorer.js';
+export type { ScorableContest, ContestScore, HistoricalData } from './contest-scorer.js';
 
 export { PriorityEngine } from './priority-engine.js';
 export type { RankedContest } from './priority-engine.js';

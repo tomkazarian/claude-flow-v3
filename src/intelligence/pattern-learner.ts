@@ -167,19 +167,42 @@ export class PatternLearner {
 
   /**
    * Loads previously persisted mappings from the database.
+   * Queries actual successful entry counts per contest to set accurate
+   * success counts rather than defaulting to 1.
    * Call this during initialization to restore learned patterns.
    */
   async loadFromDatabase(): Promise<void> {
     const db = getDb();
 
-    const contests = await db
+    const contests = db
       .select({
         id: schema.contests.id,
         url: schema.contests.url,
         formMapping: schema.contests.formMapping,
       })
       .from(schema.contests)
-      .where(sql`${schema.contests.formMapping} != '{}' AND ${schema.contests.formMapping} IS NOT NULL`);
+      .where(sql`${schema.contests.formMapping} != '{}' AND ${schema.contests.formMapping} IS NOT NULL`)
+      .all();
+
+    // Build a map of contestId -> successful entry count from the entries table.
+    // This gives us real success counts rather than the default of 1.
+    const { entries } = schema;
+    const successCounts = db
+      .select({
+        contestId: entries.contestId,
+        cnt: sql<number>`count(*)`,
+      })
+      .from(entries)
+      .where(
+        sql`${entries.status} in ('submitted', 'confirmed', 'won')`,
+      )
+      .groupBy(entries.contestId)
+      .all();
+
+    const successMap = new Map<string, number>();
+    for (const row of successCounts) {
+      successMap.set(row.contestId, row.cnt);
+    }
 
     let loadedCount = 0;
 
@@ -190,11 +213,13 @@ export class PatternLearner {
         const mapping = JSON.parse(contest.formMapping) as Record<string, string>;
         if (Object.keys(mapping).length > 0) {
           const domain = extractDomain(contest.url);
+          // Use actual successful entry count if available, else default to 1
+          const realSuccessCount = successMap.get(contest.id) ?? 1;
           const record: MappingRecord = {
             contestUrl: contest.url,
             domain,
             formMapping: mapping,
-            successCount: 1,
+            successCount: realSuccessCount,
             lastUsedAt: Date.now(),
           };
 
@@ -219,7 +244,7 @@ export class PatternLearner {
         loadedMappings: loadedCount,
         totalDomains: this.domainMappings.size,
       },
-      'Pattern learner initialized from database',
+      'Pattern learner initialized from database with real success counts',
     );
   }
 

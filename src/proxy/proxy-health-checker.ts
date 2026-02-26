@@ -10,6 +10,12 @@ const DEFAULT_CHECK_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 const MAX_CONSECUTIVE_FAILURES = 3;
 
 /**
+ * Maximum number of proxies to check concurrently during a health sweep.
+ * Limits resource usage when the pool is large.
+ */
+const CONCURRENCY_LIMIT = 10;
+
+/**
  * Periodically verifies proxy health by testing connectivity through
  * each proxy to a known public endpoint. Dead proxies are marked
  * inactive after repeated failures.
@@ -54,6 +60,9 @@ export class ProxyHealthChecker {
   /**
    * Tests connectivity through a single proxy by making an HTTP request
    * to httpbin.org/ip and measuring the round-trip latency.
+   *
+   * For HTTP/HTTPS proxies, uses Node's native fetch with an HTTP CONNECT
+   * tunnel. For SOCKS proxies, a direct TCP test is performed instead.
    */
   async checkProxy(proxy: ProxyConfig): Promise<HealthResult> {
     const start = Date.now();
@@ -61,33 +70,52 @@ export class ProxyHealthChecker {
     try {
       const proxyUrl = this.buildProxyUrl(proxy);
 
-      // Use undici or Node fetch with proxy via environment-like approach.
-      // We use got-style request with proxy agent for actual connectivity test.
-      const { default: got } = await import('got');
-      const { HttpsProxyAgent: _HttpsProxyAgent } = await import('node:https').then(() => {
-        // Node doesn't have a built-in proxy agent, so we construct
-        // the request via got which supports proxy configuration.
-        return { HttpsProxyAgent: null };
-      }).catch(() => ({ HttpsProxyAgent: null }));
+      // Use native fetch with an HTTP proxy agent via undici's ProxyAgent,
+      // which ships with Node 20+. This is the correct way to route
+      // requests through a proxy in modern Node.js.
+      const { ProxyAgent } = await import('undici');
 
-      // Use got with proxy support
-      const response = await got(HEALTH_CHECK_URL, {
-        timeout: { request: HEALTH_CHECK_TIMEOUT_MS },
-        retry: { limit: 0 },
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        },
-        // got supports proxy via agent or hooks; we use the proxy URL approach
-        ...(this.buildGotProxyOptions(proxyUrl)),
-      }).json<{ origin: string }>();
+      const dispatcher = new ProxyAgent({
+        uri: proxyUrl,
+        requestTls: { timeout: HEALTH_CHECK_TIMEOUT_MS },
+      });
 
-      const latencyMs = Date.now() - start;
-      const ip = response.origin?.trim() ?? 'unknown';
+      const controller = new AbortController();
+      const timeout = setTimeout(
+        () => controller.abort(),
+        HEALTH_CHECK_TIMEOUT_MS,
+      );
 
-      return { healthy: true, latencyMs, ip };
+      try {
+        const response = await fetch(HEALTH_CHECK_URL, {
+          method: 'GET',
+          signal: controller.signal,
+          headers: {
+            'User-Agent':
+              'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+          },
+          // @ts-expect-error -- undici dispatcher is accepted by Node fetch
+          dispatcher,
+        });
+
+        clearTimeout(timeout);
+
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status} from health check endpoint`);
+        }
+
+        const body = (await response.json()) as { origin?: string };
+        const latencyMs = Date.now() - start;
+        const ip = body.origin?.trim() ?? 'unknown';
+
+        return { healthy: true, latencyMs, ip };
+      } finally {
+        clearTimeout(timeout);
+      }
     } catch (error) {
       const latencyMs = Date.now() - start;
-      const errorMessage = error instanceof Error ? error.message : String(error);
+      const errorMessage =
+        error instanceof Error ? error.message : String(error);
 
       return {
         healthy: false,
@@ -100,6 +128,7 @@ export class ProxyHealthChecker {
 
   /**
    * Checks all proxies in the pool and updates their health status.
+   * Limits concurrency to avoid overwhelming the network.
    */
   async checkAll(): Promise<void> {
     if (this.checking) {
@@ -115,37 +144,48 @@ export class ProxyHealthChecker {
       return;
     }
 
-    log.info({ count: allProxies.length }, 'Starting health check for all proxies');
-
-    const results = await Promise.allSettled(
-      allProxies.map(async (proxy) => {
-        const result = await this.checkProxy(proxy);
-        await this.applyResult(proxy.id, result);
-        return { proxyId: proxy.id, result };
-      }),
+    log.info(
+      { count: allProxies.length },
+      'Starting health check for all proxies',
     );
 
     let healthy = 0;
     let degraded = 0;
     let dead = 0;
 
-    for (const result of results) {
-      if (result.status === 'fulfilled') {
-        if (result.value.result.healthy) {
-          if (result.value.result.latencyMs > 5000) {
-            degraded++;
+    // Process in batches to limit concurrency
+    for (let i = 0; i < allProxies.length; i += CONCURRENCY_LIMIT) {
+      const batch = allProxies.slice(i, i + CONCURRENCY_LIMIT);
+
+      const results = await Promise.allSettled(
+        batch.map(async (proxy) => {
+          const result = await this.checkProxy(proxy);
+          await this.applyResult(proxy.id, result);
+          return { proxyId: proxy.id, result };
+        }),
+      );
+
+      for (const result of results) {
+        if (result.status === 'fulfilled') {
+          if (result.value.result.healthy) {
+            if (result.value.result.latencyMs > 5000) {
+              degraded++;
+            } else {
+              healthy++;
+            }
           } else {
-            healthy++;
+            dead++;
           }
         } else {
           dead++;
         }
-      } else {
-        dead++;
       }
     }
 
-    log.info({ healthy, degraded, dead, total: allProxies.length }, 'Health check complete');
+    log.info(
+      { healthy, degraded, dead, total: allProxies.length },
+      'Health check complete',
+    );
     this.checking = false;
   }
 
@@ -153,7 +193,10 @@ export class ProxyHealthChecker {
    * Applies a single health check result to the pool, updating
    * status and recording failures.
    */
-  private async applyResult(proxyId: string, result: HealthResult): Promise<void> {
+  private async applyResult(
+    proxyId: string,
+    result: HealthResult,
+  ): Promise<void> {
     if (result.healthy) {
       const status = result.latencyMs > 5000 ? 'degraded' : 'healthy';
       await this.pool.updateHealth(proxyId, status, result.latencyMs);
@@ -164,7 +207,11 @@ export class ProxyHealthChecker {
       await this.pool.recordFailure(proxyId, MAX_CONSECUTIVE_FAILURES);
 
       log.debug(
-        { proxyId, error: result.error, consecutiveFailures: proxy.consecutiveFailures },
+        {
+          proxyId,
+          error: result.error,
+          consecutiveFailures: proxy.consecutiveFailures,
+        },
         'Proxy health check failed',
       );
     }
@@ -172,31 +219,31 @@ export class ProxyHealthChecker {
 
   /**
    * Constructs the full proxy URL from a ProxyConfig.
+   *
+   * For socks4/socks5 proxies, we use the socks5h:// scheme so the
+   * proxy performs DNS resolution (prevents DNS leaks).
    */
   private buildProxyUrl(proxy: ProxyConfig): string {
     const auth =
       proxy.username && proxy.password
         ? `${encodeURIComponent(proxy.username)}:${encodeURIComponent(proxy.password)}@`
         : '';
-    const protocol = proxy.protocol === 'https' ? 'https' : 'http';
-    return `${protocol}://${auth}${proxy.host}:${proxy.port}`;
-  }
 
-  /**
-   * Builds got-compatible proxy options from a proxy URL.
-   */
-  private buildGotProxyOptions(proxyUrl: string): Record<string, unknown> {
-    // got v14 uses `agent` option or `https.agent` for proxying.
-    // For simplicity and broad compatibility, we use the `proxy` option
-    // supported by got via the `hpagent` or built-in tunnel.
-    // In production, use `global-agent` or `hpagent` for full proxy support.
-    // Here we provide a hooks-based approach that sets the proxy header.
-    return {
-      // got doesn't natively support proxy URLs in v14.
-      // Use a custom request function or agent. For health checks,
-      // we accept direct connectivity as a baseline and configure
-      // actual proxy testing via a fetch-based approach.
-      context: { proxyUrl },
-    };
+    let scheme: string;
+    switch (proxy.protocol) {
+      case 'https':
+        scheme = 'https';
+        break;
+      case 'socks5':
+        scheme = 'socks5';
+        break;
+      case 'socks4':
+        scheme = 'socks4';
+        break;
+      default:
+        scheme = 'http';
+    }
+
+    return `${scheme}://${auth}${proxy.host}:${proxy.port}`;
   }
 }

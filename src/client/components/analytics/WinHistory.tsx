@@ -17,14 +17,7 @@ interface WinHistoryProps {
 export function WinHistory({ dateRange }: WinHistoryProps) {
   const { data, isLoading } = useWinHistory(dateRange);
 
-  const chartData = data ?? [
-    { date: '2026-01', wins: 2, prizeValue: 150 },
-    { date: '2026-02', wins: 1, prizeValue: 500 },
-    { date: '2025-12', wins: 3, prizeValue: 75 },
-    { date: '2025-11', wins: 0, prizeValue: 0 },
-    { date: '2025-10', wins: 4, prizeValue: 320 },
-    { date: '2025-09', wins: 1, prizeValue: 1000 },
-  ];
+  const chartData = data ?? [];
 
   return (
     <div className="card p-5">
@@ -34,6 +27,10 @@ export function WinHistory({ dateRange }: WinHistoryProps) {
       {isLoading ? (
         <div className="flex h-64 items-center justify-center">
           <LoadingSpinner size="sm" />
+        </div>
+      ) : chartData.length === 0 ? (
+        <div className="flex h-64 items-center justify-center text-sm text-zinc-500">
+          No win history data yet
         </div>
       ) : (
         <div className="mt-4 h-64">

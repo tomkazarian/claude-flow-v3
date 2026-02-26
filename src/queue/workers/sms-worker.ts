@@ -234,23 +234,74 @@ interface SmsMessage {
 
 /**
  * Checks for incoming SMS messages on the configured provider.
- * In production, this would query Twilio, Vonage, or another SMS API.
+ * Uses real provider SDKs (Twilio, etc.) to fetch recent messages.
+ * Returns null if no matching message is found (the caller retries).
  */
 async function checkForSms(
   provider: string,
-  _phoneNumber: string,
-  _since: number,
+  phoneNumber: string,
+  since: number,
 ): Promise<SmsMessage | null> {
-  // Integration point for SMS providers:
-  // - Twilio: use twilio.messages.list() to fetch recent messages
-  // - Vonage: use their Messages API
-  // - Virtual number providers: poll their inbox API
+  log.debug({ provider, phone: maskPhone(phoneNumber) }, 'Checking SMS inbox via provider');
 
-  log.debug({ provider }, 'Checking SMS inbox via provider');
+  try {
+    if (provider === 'twilio') {
+      return await checkTwilioInbox(phoneNumber, since);
+    }
 
-  // This would be replaced by actual SMS provider integration.
-  // Returning null triggers the retry loop.
-  return null;
+    log.warn({ provider }, 'Unknown SMS provider, cannot check inbox');
+    return null;
+  } catch (error) {
+    log.warn(
+      { err: error, provider, phone: maskPhone(phoneNumber) },
+      'Error checking SMS inbox, will retry',
+    );
+    return null;
+  }
+}
+
+/**
+ * Checks the Twilio inbox for recent inbound SMS messages
+ * using the real Twilio SDK.
+ */
+async function checkTwilioInbox(
+  phoneNumber: string,
+  since: number,
+): Promise<SmsMessage | null> {
+  const accountSid = process.env['TWILIO_ACCOUNT_SID'];
+  const authToken = process.env['TWILIO_AUTH_TOKEN'];
+
+  if (!accountSid || !authToken) {
+    log.debug('Twilio credentials not configured, cannot check SMS inbox');
+    return null;
+  }
+
+  try {
+    const { TwilioProvider } = await import('../../sms/providers/twilio.js');
+    const twilioProvider = new TwilioProvider({
+      accountSid,
+      authToken,
+    });
+
+    const sinceDate = new Date(since);
+    const messages = await twilioProvider.getMessages(phoneNumber, sinceDate);
+
+    if (messages.length > 0) {
+      // Return the most recent inbound message
+      const latest = messages[0]!;
+      return {
+        id: `twilio-${Date.now()}`,
+        from: latest.from,
+        body: latest.body,
+        receivedAt: latest.receivedAt,
+      };
+    }
+
+    return null;
+  } catch (error) {
+    log.debug({ err: error }, 'Twilio inbox check failed');
+    return null;
+  }
 }
 
 /**

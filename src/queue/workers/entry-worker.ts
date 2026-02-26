@@ -228,60 +228,152 @@ async function processEntryJob(
   let errorMessage: string | null = null;
   let screenshotPath: string | null = null;
 
-  // Browser context handle. When the orchestrator is fully integrated,
-  // it will acquire a context from the BrowserPool here and the finally
-  // block guarantees it is released even when the entry pipeline throws.
-  let browserContext: { close(): Promise<void> } | undefined;
-
   try {
     await job.updateProgress(50);
 
-    // Execute the entry orchestration pipeline:
-    // 1. Launch browser context with fingerprint and proxy
-    // 2. Navigate to contest URL
-    // 3. Analyze form fields
-    // 4. Fill form with profile data
-    // 5. Solve CAPTCHA if required
-    // 6. Submit form
-    // 7. Verify confirmation
+    // Execute the entry orchestration pipeline using the real EntryOrchestrator.
+    // The orchestrator handles: browser acquisition, navigation, form analysis,
+    // form filling, CAPTCHA solving, submission, confirmation detection,
+    // screenshot capture, and browser release.
+    const { EntryOrchestrator } = await import('../../entry/entry-orchestrator.js');
+    const orchestrator = new EntryOrchestrator();
+
+    // Attempt to set up the browser provider from the BrowserPool if available.
+    // If no browser pool is available, the orchestrator will return a failure
+    // result explaining the missing provider, which we handle below.
+    let browserPool: Awaited<typeof import('../../browser/browser-pool.js')>['BrowserPool']['prototype'] | null = null;
+    try {
+      const { BrowserPool } = await import('../../browser/browser-pool.js');
+      browserPool = new BrowserPool({
+        maxInstances: 1,
+        headless: process.env['BROWSER_HEADLESS'] !== 'false',
+      });
+
+      const capturedPool = browserPool;
+      orchestrator.setBrowserProvider({
+        acquire: async (_options) => {
+          const context = await capturedPool.acquire();
+          const pages = context.pages();
+          const page = pages.length > 0 ? pages[0]! : await context.newPage();
+          return {
+            id: `ctx-${entryId}`,
+            page: page as unknown as import('../../entry/types.js').Page,
+          };
+        },
+        release: async (_ctx) => {
+          // Pool handles context cleanup on destroy
+          try {
+            await capturedPool.destroy();
+          } catch {
+            // Best effort
+          }
+        },
+      });
+    } catch (browserErr) {
+      log.warn(
+        { err: browserErr },
+        'BrowserPool not available; entry will be attempted without browser automation',
+      );
+    }
+
+    // Build the Contest and Profile objects the orchestrator expects
+    const orchestratorContest = {
+      id: contest.id,
+      url: contest.url,
+      title: contest.title,
+      type: contest.type,
+      entryMethod: contest.entryMethod,
+      entryFrequency: contest.entryFrequency ?? 'once',
+      endDate: contest.endDate,
+      ageRequirement: null as number | null,
+      geoRestrictions: [] as string[],
+      legitimacyScore: contest.legitimacyScore ?? 0.5,
+      difficultyScore: contest.difficultyScore ?? 0.5,
+      prizeValue: contest.prizeValue ?? 0,
+      prizeDescription: contest.prizeDescription ?? '',
+    };
+
+    const orchestratorProfile = {
+      id: profile.id,
+      firstName: profile.firstName,
+      lastName: profile.lastName,
+      email: profile.email,
+      phone: profile.phone ?? '',
+      dateOfBirth: profile.dateOfBirth ?? '1990-01-01',
+      address: profile.addressLine1 ?? '',
+      city: profile.city ?? '',
+      state: profile.state ?? '',
+      zipCode: profile.zip ?? '',
+      country: profile.country ?? 'US',
+    };
 
     log.info(
       { entryId, contestUrl, method: entryMethod },
-      'Executing entry submission pipeline',
+      'Executing entry submission via orchestrator',
     );
 
-    // Update entry status to submitted
-    finalStatus = 'submitted';
-
-    await db
-      .update(schema.entries)
-      .set({
-        status: 'submitted',
-        submittedAt: new Date().toISOString(),
-        durationMs: Date.now() - startTime,
-        updatedAt: new Date().toISOString(),
-      })
-      .where(eq(schema.entries.id, entryId));
+    const result = await orchestrator.enter(
+      orchestratorContest as unknown as import('../../entry/types.js').Contest,
+      orchestratorProfile as unknown as import('../../entry/types.js').Profile,
+      { timeoutMs: 120_000, takeScreenshots: true },
+    );
 
     await job.updateProgress(80);
 
-    // Update entry limits tracking
-    await updateEntryLimits(db, contestId, profileId);
+    // Map orchestrator result to entry record status
+    if (result.status === 'confirmed' || result.status === 'submitted') {
+      finalStatus = result.status;
+      const dbStatus = result.status as 'confirmed' | 'submitted';
 
-    // Update contest status
-    await db
-      .update(schema.contests)
-      .set({
-        status: 'active',
-        lastCheckedAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      })
-      .where(eq(schema.contests.id, contestId));
+      await db
+        .update(schema.entries)
+        .set({
+          status: dbStatus,
+          submittedAt: new Date().toISOString(),
+          durationMs: Date.now() - startTime,
+          updatedAt: new Date().toISOString(),
+        })
+        .where(eq(schema.entries.id, entryId));
 
-    // Record success on the circuit breaker
-    circuitBreaker.recordSuccess(domain);
+      // Update entry limits tracking
+      await updateEntryLimits(db, contestId, profileId);
 
-    eventBus.emit('entry:submitted', { entryId, contestId, profileId });
+      // Update contest status
+      await db
+        .update(schema.contests)
+        .set({
+          status: 'active',
+          lastCheckedAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        })
+        .where(eq(schema.contests.id, contestId));
+
+      // Record success on the circuit breaker
+      circuitBreaker.recordSuccess(domain);
+
+      eventBus.emit('entry:submitted', { entryId, contestId, profileId });
+    } else {
+      // Orchestrator returned a non-success status (failed, skipped)
+      finalStatus = 'failed';
+      errorMessage = result.message || 'Entry orchestrator returned non-success status';
+
+      await db
+        .update(schema.entries)
+        .set({
+          status: 'failed',
+          errorMessage,
+          errorScreenshot: result.screenshotPath ?? null,
+          durationMs: Date.now() - startTime,
+          updatedAt: new Date().toISOString(),
+        })
+        .where(eq(schema.entries.id, entryId));
+
+      circuitBreaker.recordFailure(domain);
+      eventBus.emit('entry:failed', { entryId, error: errorMessage });
+
+      throw new EntryError(errorMessage, 'ENTRY_ORCHESTRATOR_FAILED', contestId, entryId);
+    }
+
     await job.updateProgress(100);
 
     log.info(
@@ -289,9 +381,10 @@ async function processEntryJob(
         entryId,
         contestId,
         profileId,
+        status: finalStatus,
         durationMs: Date.now() - startTime,
       },
-      'Entry submitted successfully',
+      'Entry submitted successfully via orchestrator',
     );
   } catch (error) {
     finalStatus = 'failed';
@@ -317,17 +410,6 @@ async function processEntryJob(
 
     // Re-throw so BullMQ handles the retry logic
     throw error;
-  } finally {
-    // Always release/close browser context, even on failure.
-    // This prevents browser context leaks when the orchestrator is
-    // fully integrated and acquires contexts from the BrowserPool.
-    if (browserContext) {
-      try {
-        await browserContext.close();
-      } catch (releaseErr) {
-        log.error({ err: releaseErr }, 'Failed to release browser context');
-      }
-    }
   }
 
   return { entryId, status: finalStatus };

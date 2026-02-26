@@ -2,7 +2,8 @@ import { useLocation } from 'react-router-dom';
 import { clsx } from 'clsx';
 import { Bell, Radar, Pause, Play } from 'lucide-react';
 import { useAppStore } from '../../stores/app.store';
-import { useTriggerDiscovery } from '../../api/hooks';
+import { useTriggerDiscovery, usePauseQueue, useResumeQueue } from '../../api/hooks';
+import { toast } from '../../stores/notification.store';
 
 const pageTitles: Record<string, string> = {
   '/': 'Dashboard',
@@ -21,8 +22,10 @@ export function Header() {
   const systemStatus = useAppStore((s) => s.systemStatus);
   const unreadCount = useAppStore((s) => s.unreadCount);
   const queuePaused = useAppStore((s) => s.queuePaused);
-  const toggleQueuePaused = useAppStore((s) => s.toggleQueuePaused);
+  const setQueuePaused = useAppStore((s) => s.setQueuePaused);
   const triggerDiscovery = useTriggerDiscovery();
+  const pauseQueue = usePauseQueue();
+  const resumeQueue = useResumeQueue();
 
   const statusColors: Record<string, string> = {
     healthy: 'bg-emerald-400',
@@ -47,7 +50,20 @@ export function Header() {
 
         {/* Queue toggle */}
         <button
-          onClick={toggleQueuePaused}
+          onClick={() => {
+            if (queuePaused) {
+              resumeQueue.mutate('all', {
+                onSuccess: () => { setQueuePaused(false); toast.success('Queues resumed'); },
+                onError: (err) => toast.error('Resume failed', err.message),
+              });
+            } else {
+              pauseQueue.mutate('all', {
+                onSuccess: () => { setQueuePaused(true); toast.success('Queues paused'); },
+                onError: (err) => toast.error('Pause failed', err.message),
+              });
+            }
+          }}
+          disabled={pauseQueue.isPending || resumeQueue.isPending}
           className={clsx(
             'btn-secondary text-xs',
             queuePaused && 'border-yellow-600/50 text-yellow-400',

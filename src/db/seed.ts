@@ -100,6 +100,12 @@ const sampleProfiles = [
 
 // ---------------------------------------------------------------------------
 // Discovery Sources
+//
+// These sources are wired into the real discovery module. The `name` field
+// is used to map to specialized handlers (SweepstakesAdvantageSource,
+// OnlineSweepstakesSource). The `config` JSON is passed to the handler
+// and should contain `maxPages`, `categories`, and optionally `selectors`
+// matching the DiscoverySource interface in src/discovery/types.ts.
 // ---------------------------------------------------------------------------
 const sampleSources = [
   {
@@ -108,12 +114,24 @@ const sampleSources = [
     type: "crawler" as const,
     url: "https://www.sweepstakesadvantage.com",
     config: JSON.stringify({
-      selectors: {
-        list: ".sweepstakes-list .item",
-        title: ".title a",
-        endDate: ".end-date",
-      },
-      maxPages: 10,
+      maxPages: 5,
+      categories: ["all"],
+      rateLimitMs: 2500,
+    }),
+    isActive: 1,
+    contestsFound: 0,
+    errorCount: 0,
+    schedule: "0 */4 * * *",
+  },
+  {
+    id: ulid(),
+    name: "Online-Sweepstakes",
+    type: "crawler" as const,
+    url: "https://www.online-sweepstakes.com",
+    config: JSON.stringify({
+      maxPages: 5,
+      categories: ["new", "expiring"],
+      rateLimitMs: 2500,
     }),
     isActive: 1,
     contestsFound: 0,
@@ -133,6 +151,20 @@ const sampleSources = [
   },
   {
     id: ulid(),
+    name: "Sweeties Sweeps RSS",
+    type: "rss" as const,
+    url: "https://sweetiessweeps.com/feed",
+    config: JSON.stringify({ format: "rss2" }),
+    isActive: 1,
+    contestsFound: 0,
+    errorCount: 0,
+    schedule: "0 */6 * * *",
+  },
+  {
+    // NOTE: Gleam does not offer a public API. This source requires a
+    // valid API key configured in the environment (GLEAM_API_KEY).
+    // Disabled by default until credentials are provided.
+    id: ulid(),
     name: "Gleam API",
     type: "api" as const,
     url: "https://gleam.io/api/competitions",
@@ -141,12 +173,14 @@ const sampleSources = [
       categories: ["sweepstakes", "giveaway"],
       limit: 50,
     }),
-    isActive: 1,
+    isActive: 0,
     contestsFound: 0,
     errorCount: 0,
     schedule: "0 */2 * * *",
   },
   {
+    // NOTE: Twitter/X API requires a Bearer token (TWITTER_BEARER_TOKEN).
+    // Disabled by default until credentials are provided.
     id: ulid(),
     name: "Twitter Giveaway Scanner",
     type: "social" as const,

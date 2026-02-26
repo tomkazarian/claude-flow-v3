@@ -1,8 +1,11 @@
 /**
  * BullMQ worker for processing discovery jobs.
  *
- * Each job crawls a discovery source, finds new contests, deduplicates
- * them against the database, and persists newly discovered ones.
+ * Each job crawls a discovery source using the real discovery module
+ * (SweepstakesCrawler, RSSFetcher, specialized source handlers),
+ * deduplicates results against the database using ContestDeduplicator,
+ * scores legitimacy with LegitimacyScorer, and persists newly discovered
+ * contests to the SQLite database.
  */
 
 import { Worker, type Job } from 'bullmq';
@@ -13,10 +16,23 @@ import { getLogger } from '../../shared/logger.js';
 import { eventBus } from '../../shared/events.js';
 import { AppError } from '../../shared/errors.js';
 import { generateId } from '../../shared/crypto.js';
-import { normalizeUrl } from '../../shared/utils.js';
+import { normalizeUrl, parseDate } from '../../shared/utils.js';
 import { getDb, schema } from '../../db/index.js';
 
+import { createSourceHandler } from '../../discovery/sources/index.js';
+import { ContestDeduplicator } from '../../discovery/deduplicator.js';
+import { LegitimacyScorer } from '../../discovery/legitimacy-scorer.js';
+import type { DiscoverySource, CrawlResult } from '../../discovery/types.js';
+
 const log = getLogger('queue', { component: 'discovery-worker' });
+
+// ---------------------------------------------------------------------------
+// Shared instances (reused across jobs within the same worker process)
+// ---------------------------------------------------------------------------
+
+const deduplicator = new ContestDeduplicator();
+const legitimacyScorer = new LegitimacyScorer();
+let deduplicatorInitialized = false;
 
 // ---------------------------------------------------------------------------
 // Job data shape
@@ -105,7 +121,7 @@ export function createDiscoveryWorker(
 
 async function processDiscoveryJob(
   job: Job<DiscoveryJobData>,
-): Promise<{ contestsFound: number }> {
+): Promise<{ contestsFound: number; totalFetched: number; duplicates: number; filtered: number }> {
   const { sourceId, sourceName, sourceUrl, sourceType, sourceConfig } = job.data;
 
   log.info(
@@ -115,25 +131,66 @@ async function processDiscoveryJob(
 
   eventBus.emit('discovery:started', { source: sourceName });
 
+  await job.updateProgress(5);
+
+  // Initialize deduplicator from DB on first run
+  await initializeDeduplicator();
+
   await job.updateProgress(10);
 
-  // Fetch contests from the source based on type
-  const rawContests = await fetchContestsFromSource(
-    sourceUrl,
-    sourceType,
-    sourceConfig,
-  );
+  // Build a DiscoverySource config from the job data
+  const discoverySource = buildDiscoverySource(sourceId, sourceName, sourceUrl, sourceType, sourceConfig);
+
+  // Use the real discovery module to crawl the source
+  let crawlResult: CrawlResult;
+  try {
+    const handler = createSourceHandler(discoverySource);
+    log.info(
+      { handler: handler.name, sourceId: discoverySource.id, url: discoverySource.url },
+      'Crawling with handler',
+    );
+    crawlResult = await handler.crawl(discoverySource);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new AppError(
+      `Crawl failed for source "${sourceName}" (${sourceUrl}): ${message}`,
+      'DISCOVERY_CRAWL_FAILED',
+      502,
+    );
+  }
 
   await job.updateProgress(50);
 
-  // Deduplicate against existing contests in the database
+  log.info(
+    {
+      source: sourceName,
+      contestsFetched: crawlResult.contests.length,
+      pagesCrawled: crawlResult.pagesCrawled,
+      errors: crawlResult.errors.length,
+    },
+    'Crawl phase completed',
+  );
+
+  // Deduplicate, score legitimacy, and persist new contests
   const db = getDb();
   let newContestCount = 0;
+  let duplicateCount = 0;
+  let filteredCount = 0;
 
-  for (const raw of rawContests) {
+  for (const raw of crawlResult.contests) {
+    // Deduplication using the real ContestDeduplicator
+    const dedupResult = await deduplicator.isDuplicate(raw);
+    if (dedupResult.isDuplicate) {
+      log.debug(
+        { url: raw.url, method: dedupResult.method },
+        'Duplicate contest, skipping',
+      );
+      duplicateCount++;
+      continue;
+    }
+
+    // Also check database directly in case deduplicator was not fully warm
     const normalizedUrl = normalizeUrl(raw.url);
-
-    // Check for existing contest by URL
     const existing = await db
       .select({ id: schema.contests.id })
       .from(schema.contests)
@@ -141,36 +198,74 @@ async function processDiscoveryJob(
       .limit(1);
 
     if (existing.length > 0) {
-      log.debug({ url: normalizedUrl }, 'Contest already exists, skipping');
+      log.debug({ url: normalizedUrl }, 'Contest already in DB, skipping');
+      deduplicator.markKnown(existing[0]!.id, raw);
+      duplicateCount++;
       continue;
     }
 
-    // Insert new contest
+    // Legitimacy scoring
+    const legitimacyReport = legitimacyScorer.evaluate(raw);
+    if (!legitimacyReport.passed) {
+      log.info(
+        { url: raw.url, score: legitimacyReport.score, summary: legitimacyReport.summary },
+        'Contest failed legitimacy check, skipping',
+      );
+      filteredCount++;
+      continue;
+    }
+
+    // Generate a stable external ID for this contest
+    const externalId = deduplicator.generateExternalId(raw.url, raw.sponsor);
+
+    // Parse the end date string into an ISO date
+    const endDateParsed = raw.endDate ? parseDate(raw.endDate) : null;
+    const endDateStr = endDateParsed ? endDateParsed.toISOString() : null;
+
+    // Insert the new contest into the database
     const contestId = generateId();
 
-    await db.insert(schema.contests).values({
-      id: contestId,
-      externalId: raw.externalId || generateId(),
-      url: normalizedUrl,
-      title: raw.title,
-      sponsor: raw.sponsor || null,
-      description: raw.description || null,
-      source: sourceName,
-      sourceUrl: sourceUrl,
-      type: mapContestType(raw.type),
-      entryMethod: mapEntryMethod(raw.entryMethod),
-      status: 'discovered',
-      startDate: raw.startDate || null,
-      endDate: raw.endDate || null,
-      entryFrequency: (raw.entryFrequency || 'once') as 'daily' | 'once' | 'weekly' | 'unlimited',
-      prizeDescription: raw.prizeDescription || null,
-      prizeValue: raw.prizeValue ?? null,
-      metadata: JSON.stringify({
-        discoveredAt: new Date().toISOString(),
-        sourceType,
-        rawData: raw,
-      }),
-    });
+    try {
+      await db.insert(schema.contests).values({
+        id: contestId,
+        externalId,
+        url: normalizedUrl,
+        title: raw.title.slice(0, 500),
+        sponsor: raw.sponsor || null,
+        description: raw.prizeDescription || null,
+        source: sourceName,
+        sourceUrl: sourceUrl,
+        type: mapContestType(raw.type),
+        entryMethod: mapEntryMethod(raw.entryMethod),
+        status: 'discovered',
+        endDate: endDateStr,
+        entryFrequency: mapEntryFrequency(raw.entryMethod, raw.type),
+        prizeDescription: raw.prizeDescription || null,
+        legitimacyScore: legitimacyReport.score,
+        metadata: JSON.stringify({
+          discoveredAt: new Date().toISOString(),
+          sourceType,
+          legitimacy: {
+            score: legitimacyReport.score,
+            summary: legitimacyReport.summary,
+            factors: legitimacyReport.factors,
+          },
+          rawData: raw,
+        }),
+      });
+    } catch (insertError) {
+      // Handle unique constraint violations gracefully (race condition with concurrent workers)
+      const msg = insertError instanceof Error ? insertError.message : String(insertError);
+      if (msg.includes('UNIQUE constraint') || msg.includes('unique') || msg.includes('duplicate')) {
+        log.debug({ url: normalizedUrl }, 'Contest already exists (unique constraint), skipping');
+        duplicateCount++;
+        continue;
+      }
+      throw insertError;
+    }
+
+    // Register in deduplicator for future checks within this session
+    deduplicator.markKnown(contestId, raw);
 
     eventBus.emit('contest:discovered', {
       contestId,
@@ -178,7 +273,7 @@ async function processDiscoveryJob(
       source: sourceName,
     });
 
-    newContestCount += 1;
+    newContestCount++;
   }
 
   await job.updateProgress(90);
@@ -194,184 +289,121 @@ async function processDiscoveryJob(
 
   await job.updateProgress(100);
 
+  const result = {
+    contestsFound: newContestCount,
+    totalFetched: crawlResult.contests.length,
+    duplicates: duplicateCount,
+    filtered: filteredCount,
+  };
+
   log.info(
     {
       source: sourceName,
-      totalFetched: rawContests.length,
-      newContests: newContestCount,
-      duplicates: rawContests.length - newContestCount,
+      ...result,
+      pagesCrawled: crawlResult.pagesCrawled,
+      durationMs: crawlResult.durationMs,
     },
-    'Discovery job processed',
+    'Discovery job completed',
   );
 
-  return { contestsFound: newContestCount };
+  return result;
 }
 
 // ---------------------------------------------------------------------------
-// Helpers
+// Deduplicator initialization
 // ---------------------------------------------------------------------------
-
-interface RawDiscoveredContest {
-  url: string;
-  title: string;
-  sponsor?: string;
-  description?: string;
-  externalId?: string;
-  type: string;
-  entryMethod: string;
-  startDate?: string;
-  endDate?: string;
-  entryFrequency?: string;
-  prizeDescription?: string;
-  prizeValue?: number;
-}
 
 /**
- * Fetches contests from a source URL based on the source type.
- * This delegates to the appropriate fetcher (crawler, RSS parser, API client).
- *
- * In production, this would invoke the actual discovery module crawlers.
- * The implementation here provides the integration point.
+ * Load all existing contests from the database into the deduplicator
+ * so it can detect duplicates without repeated DB queries.
  */
-async function fetchContestsFromSource(
-  sourceUrl: string,
-  sourceType: string,
-  _sourceConfig: Record<string, unknown>,
-): Promise<RawDiscoveredContest[]> {
+async function initializeDeduplicator(): Promise<void> {
+  if (deduplicatorInitialized) return;
+
   try {
-    switch (sourceType) {
-      case 'crawler':
-      case 'html': {
-        // Import and use the HTML crawler from the discovery module
-        // In a fully integrated system: const crawler = new HtmlCrawler(sourceConfig);
-        // return await crawler.crawl(sourceUrl);
-        log.info({ sourceUrl, sourceType }, 'Crawler source processing');
-        return await crawlHtmlSource(sourceUrl);
-      }
+    const db = getDb();
+    const existingContests = await db
+      .select({
+        id: schema.contests.id,
+        url: schema.contests.url,
+        title: schema.contests.title,
+        sponsor: schema.contests.sponsor,
+      })
+      .from(schema.contests);
 
-      case 'rss': {
-        log.info({ sourceUrl, sourceType }, 'RSS source processing');
-        return await fetchRssSource(sourceUrl);
-      }
-
-      case 'api': {
-        log.info({ sourceUrl, sourceType }, 'API source processing');
-        return await fetchApiSource(sourceUrl);
-      }
-
-      default:
-        log.warn({ sourceType }, 'Unknown source type, attempting generic fetch');
-        return await crawlHtmlSource(sourceUrl);
+    for (const contest of existingContests) {
+      deduplicator.registerExisting(
+        contest.id,
+        contest.url,
+        contest.title,
+        contest.sponsor ?? '',
+      );
     }
-  } catch (error) {
-    throw new AppError(
-      `Failed to fetch contests from source: ${sourceUrl}`,
-      'DISCOVERY_FETCH_ERROR',
-      502,
+
+    deduplicatorInitialized = true;
+    log.info(
+      { existingContests: existingContests.length },
+      'Deduplicator initialized from database',
     );
+  } catch (error) {
+    log.warn(
+      { err: error instanceof Error ? error.message : String(error) },
+      'Failed to initialize deduplicator from DB, will rely on DB-level dedup',
+    );
+    deduplicatorInitialized = true; // Don't retry on every job
   }
 }
 
-async function crawlHtmlSource(sourceUrl: string): Promise<RawDiscoveredContest[]> {
-  // Dynamic import to avoid loading heavy dependencies unless needed
-  const { default: got } = await import('got');
-  const cheerio = await import('cheerio');
+// ---------------------------------------------------------------------------
+// Build a DiscoverySource from job data
+// ---------------------------------------------------------------------------
 
-  const response = await got(sourceUrl, {
-    timeout: { request: 30_000 },
-    headers: {
-      'User-Agent':
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-    },
-  });
+function buildDiscoverySource(
+  sourceId: string,
+  sourceName: string,
+  sourceUrl: string,
+  sourceType: string,
+  sourceConfig: Record<string, unknown>,
+): DiscoverySource {
+  // Map the DB source type to the discovery module's source type
+  const typeMap: Record<string, 'html' | 'rss' | 'custom'> = {
+    crawler: 'html',
+    html: 'html',
+    rss: 'rss',
+    api: 'custom',
+    social: 'custom',
+    custom: 'custom',
+  };
 
-  const $ = cheerio.load(response.body);
-  const contests: RawDiscoveredContest[] = [];
+  // Map known source names to their specialized handler IDs
+  const idMap: Record<string, string> = {
+    sweepstakesadvantage: 'sweepstakes-advantage',
+    'sweepstakes advantage': 'sweepstakes-advantage',
+    'online-sweepstakes': 'online-sweepstakes',
+    'online sweepstakes': 'online-sweepstakes',
+    onlinesweepstakes: 'online-sweepstakes',
+  };
 
-  // Generic contest link extraction - look for common patterns
-  $('a[href*="sweepstakes"], a[href*="giveaway"], a[href*="contest"], a[href*="win"]').each(
-    (_index, element) => {
-      const href = $(element).attr('href');
-      const title = $(element).text().trim();
+  const normalizedName = sourceName.toLowerCase().replace(/[^a-z0-9]/g, '');
+  const handlerId = idMap[normalizedName] ?? sourceId;
 
-      if (href && title && title.length > 5) {
-        const absoluteUrl = href.startsWith('http')
-          ? href
-          : new URL(href, sourceUrl).toString();
-
-        contests.push({
-          url: absoluteUrl,
-          title: title.slice(0, 500),
-          type: 'sweepstakes',
-          entryMethod: 'form',
-        });
-      }
-    },
-  );
-
-  return contests;
+  return {
+    id: handlerId,
+    name: sourceName,
+    url: sourceUrl,
+    type: typeMap[sourceType] ?? 'html',
+    enabled: true,
+    selectors: sourceConfig['selectors'] as DiscoverySource['selectors'],
+    pagination: sourceConfig['pagination'] as DiscoverySource['pagination'],
+    categories: sourceConfig['categories'] as string[] | undefined,
+    maxPages: (sourceConfig['maxPages'] as number) ?? 5,
+    rateLimitMs: (sourceConfig['rateLimitMs'] as number) ?? 2500,
+  };
 }
 
-async function fetchRssSource(sourceUrl: string): Promise<RawDiscoveredContest[]> {
-  const { default: got } = await import('got');
-  const cheerio = await import('cheerio');
-
-  const response = await got(sourceUrl, {
-    timeout: { request: 30_000 },
-  });
-
-  const $ = cheerio.load(response.body, { xmlMode: true });
-  const contests: RawDiscoveredContest[] = [];
-
-  $('item').each((_index, element) => {
-    const title = $(element).find('title').text().trim();
-    const link = $(element).find('link').text().trim();
-    const description = $(element).find('description').text().trim();
-
-    if (link && title) {
-      contests.push({
-        url: link,
-        title: title.slice(0, 500),
-        description: description.slice(0, 2000),
-        type: 'sweepstakes',
-        entryMethod: 'form',
-      });
-    }
-  });
-
-  return contests;
-}
-
-async function fetchApiSource(sourceUrl: string): Promise<RawDiscoveredContest[]> {
-  const { default: got } = await import('got');
-
-  const response = await got(sourceUrl, {
-    timeout: { request: 30_000 },
-    responseType: 'json',
-  });
-
-  const data = response.body as Record<string, unknown>;
-  const items = (Array.isArray(data) ? data : (data['contests'] ?? data['items'] ?? [])) as Array<
-    Record<string, unknown>
-  >;
-
-  return items
-    .filter(
-      (item): item is Record<string, unknown> =>
-        typeof item === 'object' && item !== null && typeof item['url'] === 'string',
-    )
-    .map((item) => ({
-      url: item['url'] as string,
-      title: (item['title'] as string) ?? 'Untitled Contest',
-      sponsor: item['sponsor'] as string | undefined,
-      description: item['description'] as string | undefined,
-      type: (item['type'] as string) ?? 'sweepstakes',
-      entryMethod: (item['entryMethod'] as string) ?? 'form',
-      endDate: item['endDate'] as string | undefined,
-      prizeDescription: item['prizeDescription'] as string | undefined,
-      prizeValue: typeof item['prizeValue'] === 'number' ? item['prizeValue'] : undefined,
-    }));
-}
+// ---------------------------------------------------------------------------
+// Type mapping helpers
+// ---------------------------------------------------------------------------
 
 function mapContestType(
   raw: string,
@@ -398,12 +430,28 @@ function mapEntryMethod(
     social_follow: 'social',
     social_share: 'social',
     social_like: 'social',
+    social_comment: 'social',
+    social_retweet: 'social',
     email: 'email',
     newsletter: 'email',
     purchase: 'purchase',
     multi: 'multi',
+    referral_link: 'form',
+    video_watch: 'form',
+    survey: 'form',
+    app_download: 'form',
   };
   return mapping[raw.toLowerCase()] ?? 'form';
+}
+
+function mapEntryFrequency(
+  _entryMethod: string,
+  contestType: string,
+): 'daily' | 'once' | 'weekly' | 'unlimited' {
+  const lower = contestType.toLowerCase();
+  if (lower === 'daily_entry' || lower === 'daily') return 'daily';
+  if (lower === 'instant_win') return 'daily';
+  return 'once';
 }
 
 async function incrementSourceErrorCount(sourceId: string): Promise<void> {

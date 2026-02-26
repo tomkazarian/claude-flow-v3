@@ -19,11 +19,11 @@ const LABELS: Record<string, string> = {
 
 export function CostBreakdown({ overview, loading }: CostBreakdownProps) {
   const breakdown = overview?.costBreakdown ?? {
-    captcha: 12.5,
-    proxy: 8.3,
-    sms: 4.2,
-    email: 1.1,
-    other: 0.5,
+    captcha: 0,
+    proxy: 0,
+    sms: 0,
+    email: 0,
+    other: 0,
   };
 
   const data = Object.entries(breakdown)

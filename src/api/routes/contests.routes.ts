@@ -546,8 +546,8 @@ export async function contestRoutes(app: FastifyInstance): Promise<void> {
 
       logger.info({ url }, 'Manual discovery triggered');
 
-      // In a full implementation this would trigger a discovery job.
-      // For now, create a discovered contest stub.
+      // Create a contest record with 'discovered' status.
+      // Enrichment (title, prize info, form mapping) happens asynchronously via the discovery worker.
       const db = getDb();
       const normalizedUrl = normalizeUrl(url);
       const externalId = hashForDedup(normalizedUrl);

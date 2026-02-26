@@ -4,7 +4,8 @@
  */
 
 import { mkdirSync, existsSync, writeFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { resolve, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { and, gte, lte, eq, sql } from 'drizzle-orm';
 import { getDb } from '../db/index.js';
 import { entries, contests, wins, costLog, profiles } from '../db/schema.js';
@@ -19,7 +20,10 @@ import type {
 
 const log = getLogger('analytics', { service: 'export' });
 
-const EXPORT_DIR = resolve('./data/exports');
+// Resolve export directory relative to the project root (two levels up from
+// src/analytics/), not the process cwd which may vary at runtime.
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const EXPORT_DIR = resolve(__dirname, '../../data/exports');
 
 /**
  * Ensures the exports directory exists.

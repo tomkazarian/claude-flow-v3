@@ -1,13 +1,8 @@
 import { Mail, CheckCircle2, RefreshCw, Unplug } from 'lucide-react';
+import { useEmailAccounts, useConnectEmailAccount, useDisconnectEmailAccount, useSyncEmail } from '../../api/hooks';
+import { LoadingSpinner } from '../shared/LoadingSpinner';
+import { toast } from '../../stores/notification.store';
 import type { SettingsData } from '../../api/hooks';
-
-interface ConnectedAccount {
-  id: string;
-  email: string;
-  provider: string;
-  connected: boolean;
-  lastSync: string | null;
-}
 
 interface EmailSettingsProps {
   onSave: (data: Partial<SettingsData>) => void;
@@ -15,27 +10,41 @@ interface EmailSettingsProps {
 }
 
 export function EmailSettings({ onSave: _onSave, loading: _loading }: EmailSettingsProps) {
-  const connectedAccounts: ConnectedAccount[] = [
-    {
-      id: '1',
-      email: 'sweepflow@gmail.com',
-      provider: 'Gmail',
-      connected: true,
-      lastSync: '2026-02-26T10:30:00Z',
-    },
-  ];
+  const { data: accounts, isLoading } = useEmailAccounts();
+  const connectAccount = useConnectEmailAccount();
+  const disconnectAccount = useDisconnectEmailAccount();
+  const syncEmail = useSyncEmail();
 
   const handleConnect = () => {
-    // OAuth flow would go here
+    connectAccount.mutate(undefined, {
+      onSuccess: (resp) => {
+        const authUrl = resp?.data?.authUrl;
+        if (authUrl) {
+          window.open(authUrl, '_blank', 'noopener,noreferrer');
+          toast.info('OAuth started', 'Complete Gmail authorization in the new window.');
+        } else {
+          toast.success('Connection initiated');
+        }
+      },
+      onError: (err) => toast.error('Connection failed', err.message),
+    });
   };
 
-  const handleSync = (_accountId: string) => {
-    // Trigger sync
+  const handleSync = () => {
+    syncEmail.mutate(undefined, {
+      onSuccess: () => toast.success('Sync started', 'Email sync is running.'),
+      onError: (err) => toast.error('Sync failed', err.message),
+    });
   };
 
-  const handleDisconnect = (_accountId: string) => {
-    // Disconnect account
+  const handleDisconnect = (accountId: string) => {
+    disconnectAccount.mutate(accountId, {
+      onSuccess: () => toast.success('Account disconnected'),
+      onError: (err) => toast.error('Disconnect failed', err.message),
+    });
   };
+
+  const connectedAccounts = accounts ?? [];
 
   return (
     <div className="space-y-6">
@@ -46,9 +55,13 @@ export function EmailSettings({ onSave: _onSave, loading: _loading }: EmailSetti
           Connect a Gmail account to send/receive confirmation emails
         </p>
 
-        <button onClick={handleConnect} className="btn-primary mt-4">
+        <button
+          onClick={handleConnect}
+          disabled={connectAccount.isPending}
+          className="btn-primary mt-4"
+        >
           <Mail className="h-4 w-4" />
-          Connect Gmail via OAuth
+          {connectAccount.isPending ? 'Connecting...' : 'Connect Gmail via OAuth'}
         </button>
 
         <p className="mt-2 text-[10px] text-zinc-600">
@@ -62,7 +75,11 @@ export function EmailSettings({ onSave: _onSave, loading: _loading }: EmailSetti
           <h3 className="text-sm font-medium text-zinc-300">Connected Accounts</h3>
         </div>
 
-        {connectedAccounts.length === 0 ? (
+        {isLoading ? (
+          <div className="flex items-center justify-center py-12">
+            <LoadingSpinner message="Loading email accounts..." />
+          </div>
+        ) : connectedAccounts.length === 0 ? (
           <div className="py-12 text-center text-sm text-zinc-500">
             No email accounts connected.
           </div>
@@ -76,16 +93,16 @@ export function EmailSettings({ onSave: _onSave, loading: _loading }: EmailSetti
 
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2">
-                    <p className="text-sm font-medium text-zinc-200">{account.email}</p>
-                    {account.connected && (
+                    <p className="text-sm font-medium text-zinc-200">{account.emailAddress}</p>
+                    {account.isActive ? (
                       <CheckCircle2 className="h-4 w-4 text-emerald-400" />
-                    )}
+                    ) : null}
                   </div>
                   <p className="text-xs text-zinc-500">
                     {account.provider}
-                    {account.lastSync && (
+                    {account.lastSyncAt && (
                       <span className="ml-2">
-                        Last synced: {new Date(account.lastSync).toLocaleString()}
+                        Last synced: {new Date(account.lastSyncAt).toLocaleString()}
                       </span>
                     )}
                   </p>
@@ -93,14 +110,16 @@ export function EmailSettings({ onSave: _onSave, loading: _loading }: EmailSetti
 
                 <div className="flex items-center gap-2">
                   <button
-                    onClick={() => handleSync(account.id)}
+                    onClick={handleSync}
+                    disabled={syncEmail.isPending}
                     className="btn-ghost p-2 text-xs"
                     title="Sync now"
                   >
-                    <RefreshCw className="h-4 w-4" />
+                    <RefreshCw className={`h-4 w-4 ${syncEmail.isPending ? 'animate-spin' : ''}`} />
                   </button>
                   <button
                     onClick={() => handleDisconnect(account.id)}
+                    disabled={disconnectAccount.isPending}
                     className="btn-ghost p-2 text-xs text-rose-400"
                     title="Disconnect"
                   >

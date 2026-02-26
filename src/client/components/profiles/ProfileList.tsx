@@ -36,7 +36,6 @@ export function ProfileList({ profiles, loading, onEdit, onToggleActive }: Profi
         <ProfileCard
           key={profile.id}
           profile={profile}
-          stats={{ entries: 0, wins: 0, successRate: 0 }}
           onEdit={onEdit}
           onToggleActive={onToggleActive}
         />

@@ -1,9 +1,10 @@
 /**
  * Audit trail service.
  * Records significant platform actions for compliance and debugging.
+ * Uses real database transactions for batch operations.
  */
 
-import { getDb } from '../db/index.js';
+import { getDb, getSqlite } from '../db/index.js';
 import { auditLog } from '../db/schema.js';
 import { generateId } from '../shared/crypto.js';
 import { getLogger } from '../shared/logger.js';
@@ -67,11 +68,50 @@ export class AuditService {
   }
 
   /**
-   * Record multiple audit events.
+   * Record multiple audit events atomically in a single transaction.
+   * If any insert fails, the entire batch is rolled back. This ensures
+   * audit trail consistency and improves performance for bulk operations
+   * by avoiding per-row fsync overhead.
    */
   async recordBatch(entries: AuditEntry[]): Promise<void> {
-    for (const entry of entries) {
-      await this.record(entry);
+    if (entries.length === 0) return;
+
+    try {
+      const db = getDb();
+      const sqlite = getSqlite();
+      const now = new Date().toISOString();
+
+      const insertBatch = sqlite.transaction(() => {
+        for (const entry of entries) {
+          db.insert(auditLog)
+            .values({
+              id: generateId(),
+              action: entry.action,
+              entityType: entry.entityType,
+              entityId: entry.entityId,
+              details: entry.details ? JSON.stringify(entry.details) : '{}',
+              createdAt: now,
+            })
+            .run();
+        }
+      });
+
+      insertBatch();
+
+      log.debug(
+        { count: entries.length },
+        'Audit batch recorded in transaction',
+      );
+    } catch (error) {
+      // Audit failures should never crash the application
+      log.error(
+        { err: error, count: entries.length },
+        'Failed to record audit batch, falling back to individual inserts',
+      );
+      // Fall back to individual inserts so partial data is still captured
+      for (const entry of entries) {
+        await this.record(entry);
+      }
     }
   }
 }
