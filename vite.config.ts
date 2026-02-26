@@ -35,7 +35,7 @@ export default defineConfig({
     port: 5173,
     strictPort: false,
     proxy: {
-      "/api": {
+      "/api/v1": {
         target: "http://localhost:3000",
         changeOrigin: true,
         secure: false,
@@ -51,7 +51,7 @@ export default defineConfig({
   preview: {
     port: 4173,
     proxy: {
-      "/api": {
+      "/api/v1": {
         target: "http://localhost:3000",
         changeOrigin: true,
         secure: false,
