@@ -8,12 +8,12 @@
     "node": ">=20.0.0"
   },
   "scripts": {
-    "dev": "tsx watch src/server/index.ts",
+    "dev": "tsx watch src/index.ts",
     "dev:client": "vite",
     "build": "npm run build:server && npm run build:client",
     "build:server": "tsc -p tsconfig.build.json",
     "build:client": "vite build",
-    "start": "node dist/server/index.js",
+    "start": "node dist/index.js",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",

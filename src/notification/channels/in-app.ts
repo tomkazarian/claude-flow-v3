@@ -7,7 +7,7 @@
  * webhooks/email are not configured.
  */
 
-import { eq, desc, and } from 'drizzle-orm';
+import { eq, desc } from 'drizzle-orm';
 import { getDb } from '../../db/index.js';
 import { notifications } from '../../db/schema.js';
 import { generateId } from '../../shared/crypto.js';
@@ -78,22 +78,14 @@ export class InAppChannel implements NotificationChannel {
     try {
       const db = getDb();
 
-      let query = db
-        .select()
-        .from(notifications)
+      const baseQuery = unreadOnly
+        ? db.select().from(notifications).where(eq(notifications.isRead, 0))
+        : db.select().from(notifications);
+
+      const rows = baseQuery
         .orderBy(desc(notifications.createdAt))
-        .limit(limit);
-
-      if (unreadOnly) {
-        query = db
-          .select()
-          .from(notifications)
-          .where(eq(notifications.isRead, 0))
-          .orderBy(desc(notifications.createdAt))
-          .limit(limit);
-      }
-
-      const rows = query.all();
+        .limit(limit)
+        .all();
 
       return rows.map((row) => ({
         id: row.id,

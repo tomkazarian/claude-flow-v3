@@ -1,11 +1,11 @@
 {
-  "timestamp": "2026-02-25T23:20:52.728Z",
+  "timestamp": "2026-02-26T10:41:18.050Z",
   "projectRoot": "/workspaces/claude-flow-v3",
   "structure": {
-    "hasPackageJson": false,
-    "hasTsConfig": false,
+    "hasPackageJson": true,
+    "hasTsConfig": true,
     "hasClaudeConfig": true,
     "hasClaudeFlow": true
   },
-  "scannedAt": 1772061652728
+  "scannedAt": 1772102478050
 }

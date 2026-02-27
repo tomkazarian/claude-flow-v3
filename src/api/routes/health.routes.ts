@@ -1,5 +1,4 @@
 import type { FastifyInstance } from 'fastify';
-import { getDb } from '../../db/index.js';
 import { getSqlite } from '../../db/index.js';
 
 const startedAt = Date.now();
